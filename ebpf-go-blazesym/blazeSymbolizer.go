@@ -30,7 +30,7 @@ func (b *BlazeSymbolizer) Resolve(ip uint64) string {
 
 	// 1. Chiamiamo il metodo specifico per i processi, passando un ARRAY di indirizzi
 	// (Esattamente come faceva l'esempio con []uint64{0x2000200})
-	symbols, err := b.sym.SymbolizeProcessAbsAddrs([]uint64{ip}, b.pid)
+	symbols, err := b.sym.SymbolizeProcessAbsAddrs([]uint64{ip}, b.pid, blazesym.ProcessSourceWithPerfMap(true))
 
 	// 2. Controllo errori e risultati vuoti
 	if err != nil || len(symbols) == 0 {
