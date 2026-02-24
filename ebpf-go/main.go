@@ -33,7 +33,7 @@ var syscallNames = map[uint32]string{
 	0: "read", 1: "write", 2: "open", 3: "close", 4: "stat", 5: "fstat",
 	9: "mmap", 10: "mprotect", 11: "munmap", 12: "brk", 14: "rt_sigprocmask",
 	16: "ioctl", 17: "pread64", 20: "writev", 21: "access", 22: "pipe",
-	24: "sched_yield", 28: "madvise", 41: "socket", 42: "connect", 44: "sendto",
+	24: "sched_yield", 28: "madvise", 41: "socket", 42: "connect", 44: "sendto", 228: "clock_gettime",
 	257: "openat", 262: "fstatat", 281: "epoll_wait", 293: "pipe2", 318: "getrandom",
 }
 
@@ -45,36 +45,43 @@ func getSyscallName(id uint32) string {
 }
 
 func main() {
+	//os.Args array di stringhe passate in input, 0 è il nome del programma e 1 il PID
 	if len(os.Args) < 2 {
 		log.Fatalf("Uso corretto: sudo ./monitor <PID_NODEJS>")
 	}
 
+	//conversione PID da stringa a intero
 	targetPID, err := strconv.ParseUint(os.Args[1], 10, 32)
 	if err != nil {
 		log.Fatalf("PID non valido: %v", err)
 	}
 
+	//Removes the limit on the amount of memory the current process can lock into RAM
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal(err)
 	}
 
 	objs := traceObjects{}
+	//Inietta nel kernel il bytecode eBPF compilato, crea le mappe e valida il programma
+	//poi inserisce in objs i file descriptor che collegano Go al programma ebpf nel kernel
 	if err := loadTraceObjects(&objs, nil); err != nil {
 		log.Fatalf("Errore caricamento oggetti: %v", err)
 	}
 	defer objs.Close()
 
+	//Inserisco nella mappa eBPF il target PID passato dall'utente
 	key := uint32(0)
 	val := uint32(targetPID)
 	objs.TargetPidMap.Put(&key, &val)
 
+	//Aggagancia la funzione trace_sys_enter definita in trace.c a sysenter
 	tp, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
 	if err != nil {
 		log.Fatalf("Errore aggancio tracepoint: %v", err)
 	}
 	defer tp.Close()
 
-	fmt.Printf("🔍 Monitoraggio stack trace per PID %d avviato (Modalità: RING BUFFER).\n", targetPID)
+	fmt.Printf("🔍 Monitoraggio stack trace per PID %d avviato (RING BUFFER).\n", targetPID)
 
 	symb := NewSymbolizer(int(targetPID))
 

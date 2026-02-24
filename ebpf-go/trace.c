@@ -4,8 +4,8 @@
 #include <bpf/bpf_helpers.h>
 
 
-// 1. LA NUOVA STRUTTURA PER IL RING BUFFER
-// Trucco da Pro: Mettendo il dato più grande (8 byte) per primo, e i due 
+// 1. STRUTTURA PER IL RING BUFFER
+// Mettendo il dato più grande (8 byte) per primo, e i due 
 // da 4 byte dopo, raggiungiamo esattamente i 16 byte. Nessun "buco" di memoria!
 struct my_syscall_info {
     __u64 timestamp_ns; // 8 byte
@@ -21,7 +21,7 @@ struct {
     __uint(max_entries, 1);
 } target_pid_map SEC(".maps");
 
-// Mappa dedicata agli Stack Trace (rimane invariata)
+// Mappa dedicata agli Stack Trace 
 struct {
     __uint(type, BPF_MAP_TYPE_STACK_TRACE);
     __uint(key_size, sizeof(__u32));
