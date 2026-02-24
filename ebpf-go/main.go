@@ -86,23 +86,31 @@ func main() {
 	symb := NewSymbolizer(int(targetPID))
 
 	var ts unix.Timespec
+	//Riempe ts con i secondi ed i nanosecondi da quando la macchina è accesa
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
 		log.Fatalf("Impossibile leggere il clock di sistema: %v", err)
 	}
+	//Tempo totale di accensione in nanosecondi
 	uptimeNs := uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
+	//Calcolo istante esatto(data e ora) di accensione della macchina
 	bootTime := time.Now().Add(-time.Duration(uptimeNs))
 
 	// 1. INIZIALIZZIAMO IL LETTORE DEL RING BUFFER
-	rd, err := ringbuf.NewReader(objs.Events) // "Events" è la mappa definita in C
+	rd, err := ringbuf.NewReader(objs.Events) // "Events" è il ring buffer definito in C
 	if err != nil {
 		log.Fatalf("Errore apertura ringbuf reader: %v", err)
 	}
 	defer rd.Close()
 
+	//Creiamo una cassetta della posta chiamata stopper per ricevere messaggi di tipo os.Signal
 	stopper := make(chan os.Signal, 1)
+	//se l'utente preme Ctrl+C (os.Interrupt) o cerca di interrompere il processo (SIGTERM)
+	//prendi quel segnale e mettilo in stopper
 	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
 
 	// Goroutine per uscire puliti quando premiamo Ctrl+C
+	//Il comando go avvia una goroutine parallela, se legge qualcosa da stopper significa che
+	//c'è un segnale di interruzione del processo, chiude il reader del ringbuffer e chiude il programma
 	go func() {
 		<-stopper
 		fmt.Println("\n🛑 Uscita in corso...")
@@ -112,11 +120,13 @@ func main() {
 
 	fmt.Println("In attesa di eventi...")
 
+	//creiamo un punto di partenza per la lettura del file perf-map
 	lastJITReload := time.Now()
 
-	// 2. CICLO INFINITO BLOCCANTE (Consumo CPU quasi a 0%)
+	// 2. CICLO INFINITO BLOCCANTE
 	for {
-		// Il programma si "addormenta" qui finché il kernel non invia un evento!
+		// Il programma si "addormenta" qui finché il kernel non invia un evento
+		//ogni volta che arriva un evento nel buffer, viene messo in record
 		record, err := rd.Read()
 		if err != nil {
 			// Se l'errore è dovuto alla chiusura del file (da parte di Ctrl+C), usciamo in silenzio
@@ -129,33 +139,44 @@ func main() {
 
 		// Ricarichiamo le mappe JIT (perf-map) al massimo una volta ogni 5 secondi,
 		// per evitare rallentamenti se arrivano migliaia di eventi in un secondo.
+
+		//Se sono passati meno di 5 secondi, salta il blocco e usa la mappa in memoria
+		//Se sono passati più di 5 secondi, rilegge il file perf-map
+		// per aggiornarsi sulle nuove funzioni JIT caricate da Node.js,
+		//  e poi aggiorna lastJITReload all'ora attuale
 		if time.Since(lastJITReload) > 5*time.Second {
 			symb.loadPerfMap()
 			lastJITReload = time.Now()
 		}
 
 		// 3. DECODIFICA BINARIA
-		// Trasformiamo i byte grezzi (record.RawSample) nella nostra struct Go
+		// Trasformiamo i 16 byte grezzi (record.RawSample) nella nostra Go SyscallInfo
 		var info SyscallInfo
+		//Read taglia i byte letti in 8+4+4 e li assegna alla struct info che abbiamo definito
 		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &info); err != nil {
 			log.Printf("Errore decodifica evento: %v", err)
 			continue
 		}
 
-		// Andiamo a ripescare i dettagli dello stack (nella mappa StackMap)
+		// Andiamo a ripescare i dettagli dello stack tramite lo stack id (nella mappa StackMap)
 		var stackFrames [127]uint64
 		err = objs.StackMap.Lookup(&info.StackId, &stackFrames)
 		if err != nil {
 			continue
 		}
 
+		//Ricavo data ed ora esatta in cui si è verificato l'evento
+		//aggiungendo al tempo di boot i nanosecondi in cui si è verificato l'evento
 		eventTime := bootTime.Add(time.Duration(info.TimestampNs))
-		// Ho aggiunto i microsecondi (.000000) così puoi vedere l'ordine esatto degli eventi in raffica!
 		timeStr := eventTime.Format("15:04:05.000000")
 
 		fmt.Printf("\n🕒 [%s] 🔹 Syscall: %-15s (ID: %d) | Stack ID: %d\n",
 			timeStr, getSyscallName(info.SyscallId), info.SyscallId, info.StackId)
 
+		//CONVERTIAMO GLI INDIRIZZI DI MEMORIA NEI NOMI DELLE FUNZIONI
+		//per ogni elemento di stackFrames estraggo indice i ed indirizzo ip instruction pointer
+		//Se incontro un ip = 0x00000000 , lo stack è finito (< 127 frame) e quindi chiudo
+		//poi risolvo il simbolo ip con symbolizer
 		for i, ip := range stackFrames {
 			if ip == 0 {
 				break
