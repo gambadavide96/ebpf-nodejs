@@ -58,6 +58,9 @@ func NewSymbolizer(pid int) *Symbolizer {
 }
 
 // 1. Carica la mappa della memoria di Linux
+// Il file /proc/<PID>/maps contiene l'elenco esatto di dove sono posizionate le librerie
+// (come libc o il binario di node) nella memoria RAM.
+// Questa funzione legge quel file e lo trasforma in dati utili per il Symbolizer.
 func (s *Symbolizer) loadProcMaps() {
 	file, err := os.Open(fmt.Sprintf("/proc/%d/maps", s.pid))
 	if err != nil {
@@ -65,18 +68,23 @@ func (s *Symbolizer) loadProcMaps() {
 	}
 	defer file.Close()
 
+	//Lo scanner legge il file riga per riga.
 	scanner := bufio.NewScanner(file)
+	//ES: 7f8a9b000000-7f8a9b200000 r-xp 00000000 08:01 123456 /usr/lib/libc.so.6
+	//Prende questa riga e la taglia in un array di "parole" usando gli spazi vuoti come separatore.
+	//Poiché a noi interessano solo i file binari da analizzare (ELF), se la riga ha meno di 6 colonne la ignoriamo e passiamo alla successiva
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 6 {
 			continue // Ignoriamo le regioni di memoria anonime senza percorso
 		}
-
+		//Prende la prima colonna (es. 7f8a9b000000-7f8a9b200000) e la divide a metà usando il trattino (-).
 		addrs := strings.Split(fields[0], "-")
+		//Convertiamo gli indirizzi di memoria in base 16 in un numero a 64 bit
 		start, _ := strconv.ParseUint(addrs[0], 16, 64)
 		end, _ := strconv.ParseUint(addrs[1], 16, 64)
 		offset, _ := strconv.ParseUint(fields[2], 16, 64)
-
+		//Creo la struttura dati memoryRegion e la appendo nell'array
 		s.regions = append(s.regions, MemoryRegion{
 			Start: start, End: end, Offset: offset, Path: fields[5],
 		})
@@ -98,6 +106,8 @@ func (s *Symbolizer) loadPerfMap() {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		// Formato: <indirizzo_esadecimale> <dimensione_esadecimale> <NomeFunzione>
+		//Taglia la stringa al primo spazio, poi al secondo spazio, e tutto il resto che avanza lascialo intatto nel terzo pezzo,
+		// a prescindere da quanti spazi contenga".
 		parts := strings.SplitN(scanner.Text(), " ", 3)
 		if len(parts) < 3 {
 			continue
