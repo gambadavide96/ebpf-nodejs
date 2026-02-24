@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"path/filepath"
 
 	// L'import corretto dal tuo esempio
 	blazesym "github.com/libbpf/blazesym/go"
@@ -40,14 +39,6 @@ func (b *BlazeSymbolizer) Resolve(ip uint64) string {
 	// 3. Estraiamo il primo (e unico, dato che abbiamo passato un solo IP) risultato
 	sym := symbols[0]
 
-	// 4. Se abbiamo i dati di debug (DWARF), siamo sicuri al 100% che sia codice nativo C/C++
-	if sym.CodeInfo != nil && sym.CodeInfo.File != "" {
-		fileName := filepath.Base(sym.CodeInfo.File)
-		return fmt.Sprintf("[Nativo] %s (%s:%d)", sym.Name, fileName, sym.CodeInfo.Line)
-	}
-
-	// 5. Se non abbiamo dati di debug, potrebbe essere una funzione di sistema C strippata,
-	// oppure una funzione JavaScript letta dal file perf-map.
-	// Stampiamo solo il nome, senza prefissi fuorvianti!
+	// 4. Stampiamo solo il nome, senza prefissi fuorvianti!
 	return fmt.Sprintf("%s", sym.Name)
 }
