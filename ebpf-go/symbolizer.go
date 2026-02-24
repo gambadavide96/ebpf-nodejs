@@ -11,7 +11,16 @@ import (
 	"github.com/ianlancetaylor/demangle"
 )
 
+/*
+Per tradurre un indirizzo C++, Symbolizer deve capire a quale file appartiene (es. /usr/lib/libc.so.6), aprirlo dal disco fisso,
+decodificare il suo formato binario (che su Linux si chiama ELF - Executable and Linkable Format)
+e cercare nella sua tabella dei simboli.
+*/
+
 // MemoryRegion rappresenta una riga di /proc/<PID>/maps
+//Per risolvere i simboli del codice nativo (binario node e librerie di sistema)
+
+// ES: 7f8a9b000000-7f8a9b200000 r-xp 00000000 08:01 123456 /usr/lib/libc.so.6
 type MemoryRegion struct {
 	Start  uint64
 	End    uint64
@@ -20,6 +29,8 @@ type MemoryRegion struct {
 }
 
 // JITSymbol rappresenta una funzione JavaScript presa da /tmp/perf-<PID>.map
+
+// ES: 3fbd8a1000 250 LazyCompile:*app.get /var/www/app.js
 type JITSymbol struct {
 	Start uint64
 	End   uint64
@@ -27,20 +38,21 @@ type JITSymbol struct {
 }
 
 type Symbolizer struct {
-	pid        int
-	regions    []MemoryRegion
-	jitSymbols []JITSymbol
-	elfCache   map[string]*elf.File
-	symCache   map[uint64]string // Cache per non ricalcolare lo stesso IP
+	pid        int                  //Per costruire i percorsi dei file da leggere (es. /proc/1234/maps e /tmp/perf-1234.map).
+	regions    []MemoryRegion       //Contiene le mappe delle librerie C/C++
+	jitSymbols []JITSymbol          //Contiene le funzioni javascript JIT
+	elfCache   map[string]*elf.File //Salva nella mappa i file ELF aperti per accesso veloce (come una cache)
+	symCache   map[uint64]string    // MODIFICARE:Cache per non ricalcolare IP solo per funzioni C/C++ (Oppure togliere)
 }
 
+// Costruttore dell'oggetto symbolizer, restituisce un puntatore allla struct
 func NewSymbolizer(pid int) *Symbolizer {
 	sym := &Symbolizer{
 		pid:      pid,
-		elfCache: make(map[string]*elf.File),
+		elfCache: make(map[string]*elf.File), //con make alloca lo spazio per le due mappe
 		symCache: make(map[uint64]string),
 	}
-	sym.loadProcMaps()
+	sym.loadProcMaps() //chiamo i due metodi per riempire gli array delle funzioni C/C++ e JS
 	sym.loadPerfMap()
 	return sym
 }
