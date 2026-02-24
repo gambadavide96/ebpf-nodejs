@@ -17,9 +17,8 @@ decodificare il suo formato binario (che su Linux si chiama ELF - Executable and
 e cercare nella sua tabella dei simboli.
 */
 
-// MemoryRegion rappresenta una riga di /proc/<PID>/maps
-//Per risolvere i simboli del codice nativo (binario node e librerie di sistema)
-
+// MemoryRegion rappresenta una riga di /proc/<PID>/maps, contiene quali file binari sono stati caricati e dove sono
+// Per risolvere i simboli del codice nativo (binario node e librerie di sistema)
 // ES: 7f8a9b000000-7f8a9b200000 r-xp 00000000 08:01 123456 /usr/lib/libc.so.6
 type MemoryRegion struct {
 	Start  uint64
@@ -29,7 +28,6 @@ type MemoryRegion struct {
 }
 
 // JITSymbol rappresenta una funzione JavaScript presa da /tmp/perf-<PID>.map
-
 // ES: 3fbd8a1000 250 LazyCompile:*app.get /var/www/app.js
 type JITSymbol struct {
 	Start uint64
