@@ -62,16 +62,10 @@ func (b *BlazeSymbolizer) ResolveBatch(ips []uint64) []string {
 	// 3. Mappiamo i risultati
 	// Blazesym ci restituisce un array "symbols" parallelo al nostro array "ips"
 	for i, ip := range ips {
-		// Controllo di sicurezza nel caso l'array symbols fosse più corto del previsto
-		//in tal caso stampiamo l'indirizzo al posto del nome
-		if i >= len(symbols) {
-			results[i] = fmt.Sprintf("0x%x", ip)
-			continue
-		}
 
 		sym := symbols[i]
 
-		// Se incontriamo un Trampoline V8 o un indirizzo non risolto, stampiamo l'indirizzo al suo posto
+		// Se incontriamo un indirizzo non risolto, stampiamo l'indirizzo al suo posto
 		if sym.Name == "" {
 			results[i] = fmt.Sprintf("0x%x", ip)
 		} else {
