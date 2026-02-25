@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 
-	// L'import corretto dal tuo esempio
 	blazesym "github.com/libbpf/blazesym/go"
 )
 
@@ -25,10 +24,11 @@ func NewBlazeSymbolizer(pid int) *BlazeSymbolizer {
 	}
 }
 
+// Funzione Resolve per risolvere gli indirizzi ip uno alla volta
 func (b *BlazeSymbolizer) Resolve(ip uint64) string {
 
-	// 1. Chiamiamo il metodo specifico per i processi, passando un ARRAY di indirizzi
-	// (Esattamente come faceva l'esempio con []uint64{0x2000200})
+	//SymbolizeProcessAbsAddrs symbolizes a list of process absolute addresses.
+	//Passiamo un unico indirizzo ip da risolvere, ma lo incartiamo dentro un array
 	symbols, err := b.sym.SymbolizeProcessAbsAddrs([]uint64{ip}, b.pid, blazesym.ProcessSourceWithPerfMap(true))
 
 	// 2. Controllo errori e risultati vuoti
@@ -41,4 +41,43 @@ func (b *BlazeSymbolizer) Resolve(ip uint64) string {
 
 	// 4. Stampiamo solo il nome, senza prefissi fuorvianti!
 	return fmt.Sprintf("%s", sym.Name)
+}
+
+// ResolveBatch risolve un intero array di indirizzi in una singola chiamata a Blazesym
+func (b *BlazeSymbolizer) ResolveBatch(ips []uint64) []string {
+	// Prepariamo l'array dei risultati della stessa lunghezza degli IP in ingresso
+	results := make([]string, len(ips))
+
+	// 1. L'Esecuzione Batch: passiamo l'intero array "ips" al motore Rust
+	symbols, err := b.sym.SymbolizeProcessAbsAddrs(ips, b.pid, blazesym.ProcessSourceWithPerfMap(true))
+
+	// 2. Se c'è un errore, riempiamo i risultati con gli indirizzi raw
+	if err != nil || len(symbols) == 0 {
+		for i, ip := range ips {
+			results[i] = fmt.Sprintf("[Sconosciuto] 0x%x", ip)
+		}
+		return results
+	}
+
+	// 3. Mappiamo i risultati
+	// Blazesym ci restituisce un array "symbols" parallelo al nostro array "ips"
+	for i, ip := range ips {
+		// Controllo di sicurezza nel caso l'array symbols fosse più corto del previsto
+		//in tal caso stampiamo l'indirizzo al posto del nome
+		if i >= len(symbols) {
+			results[i] = fmt.Sprintf("0x%x", ip)
+			continue
+		}
+
+		sym := symbols[i]
+
+		// Se incontriamo un Trampoline V8 o un indirizzo non risolto, stampiamo l'indirizzo al suo posto
+		if sym.Name == "" {
+			results[i] = fmt.Sprintf("0x%x", ip)
+		} else {
+			results[i] = sym.Name
+		}
+	}
+
+	return results
 }

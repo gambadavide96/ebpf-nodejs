@@ -158,16 +158,27 @@ func main() {
 		fmt.Printf("\n🕒 [%s] 🔹 Syscall: %-15s (ID: %d) | Stack ID: %d\n",
 			timeStr, getSyscallName(info.SyscallId), info.SyscallId, info.StackId)
 
-		//4. CONVERTIAMO GLI INDIRIZZI DI MEMORIA NEI NOMI DELLE FUNZIONI
-		//per ogni elemento di stackFrames estraggo indice i ed indirizzo ip instruction pointer
-		//Se incontro un ip = 0x00000000 , lo stack è finito (< 127 frame) e quindi chiudo
-		//poi risolvo il simbolo ip con symbolizer
-		for i, ip := range stackFrames {
+		// ---------------------------------------------------------
+		// RISOLUZIONE BATCH (una sola chiamata a BlazeSym)
+		// ---------------------------------------------------------
+
+		// 1. Estraiamo solo gli IP validi (interrompiamo al primo 0)
+		var validIPs []uint64
+		for _, ip := range stackFrames {
 			if ip == 0 {
 				break
 			}
-			funcName := symb.Resolve(ip)
-			fmt.Printf("      [%2d] %s\n", i, funcName)
+			validIPs = append(validIPs, ip)
+		}
+
+		// 2. Se ci sono IP da risolvere, li passiamo tutti insieme a Blazesym
+		if len(validIPs) > 0 {
+			resolvedNames := symb.ResolveBatch(validIPs)
+
+			// 3. Stampiamo i risultati formattati
+			for i, funcName := range resolvedNames {
+				fmt.Printf("      [%2d] %s\n", i, funcName)
+			}
 		}
 	}
 }
