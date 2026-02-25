@@ -33,8 +33,9 @@ var syscallNames = map[uint32]string{
 	0: "read", 1: "write", 2: "open", 3: "close", 4: "stat", 5: "fstat",
 	9: "mmap", 10: "mprotect", 11: "munmap", 12: "brk", 14: "rt_sigprocmask",
 	16: "ioctl", 17: "pread64", 20: "writev", 21: "access", 22: "pipe",
-	24: "sched_yield", 28: "madvise", 41: "socket", 42: "connect", 44: "sendto", 228: "clock_gettime",
-	257: "openat", 262: "fstatat", 281: "epoll_wait", 293: "pipe2", 318: "getrandom",
+	24: "sched_yield", 28: "madvise", 41: "socket", 42: "connect", 44: "sendto", 202: "futex",
+	228: "clock_gettime", 257: "openat", 262: "fstatat", 281: "epoll_wait",
+	293: "pipe2", 318: "getrandom",
 }
 
 func getSyscallName(id uint32) string {
