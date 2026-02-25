@@ -56,7 +56,8 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
         return 0;
     }
 
-    // Cerchiamo lo stack (se fallisce, usciamo per non inviare dati inutili)
+    // Ricaviamo lo stack del processo Node, viene restituito uno stack id
+    //e la riga corrispondente viene popolata con gli indirizzi
     int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
     if (stack_id < 0) {
         return 0; 

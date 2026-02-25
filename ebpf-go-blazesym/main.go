@@ -102,7 +102,7 @@ func main() {
 	}
 	defer rd.Close()
 
-	//Creiamo una cassetta della posta chiamata stopper per ricevere messaggi di tipo os.Signal
+	//Creiamo stopper per ricevere messaggi di tipo os.Signal
 	stopper := make(chan os.Signal, 1)
 	//se l'utente preme Ctrl+C (os.Interrupt) o cerca di interrompere il processo (SIGTERM)
 	//prendi quel segnale e mettilo in stopper
@@ -158,7 +158,7 @@ func main() {
 		fmt.Printf("\n🕒 [%s] 🔹 Syscall: %-15s (ID: %d) | Stack ID: %d\n",
 			timeStr, getSyscallName(info.SyscallId), info.SyscallId, info.StackId)
 
-		//CONVERTIAMO GLI INDIRIZZI DI MEMORIA NEI NOMI DELLE FUNZIONI
+		//4. CONVERTIAMO GLI INDIRIZZI DI MEMORIA NEI NOMI DELLE FUNZIONI
 		//per ogni elemento di stackFrames estraggo indice i ed indirizzo ip instruction pointer
 		//Se incontro un ip = 0x00000000 , lo stack è finito (< 127 frame) e quindi chiudo
 		//poi risolvo il simbolo ip con symbolizer

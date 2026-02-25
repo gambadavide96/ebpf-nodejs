@@ -3,6 +3,7 @@
 # ---------------------------------------------------
 # Ignore the main compiled binary of the tool
 node-ebpf
+trace-node
 
 # ---------------------------------------------------
 # 2. ebpf-go (bpf2go) Generated Files
