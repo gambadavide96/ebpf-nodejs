@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -84,6 +85,10 @@ func main() {
 
 	fmt.Printf("🔍 Monitoraggio stack trace per PID %d avviato (RING BUFFER).\n", targetPID)
 
+	// 1. INIZIALIZZAZIONE STRUTTURA DATI PER IL TRACKING
+	// Struttura: map[NomeSyscall]map[ChiaveStackUnica]ArrayDiFunzioni
+	syscallStacksTracker := make(map[string]map[string][]string)
+
 	symb := NewBlazeSymbolizer(int(targetPID))
 
 	var ts unix.Timespec
@@ -109,14 +114,11 @@ func main() {
 	//prendi quel segnale e mettilo in stopper
 	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
 
-	// Goroutine per uscire puliti quando premiamo Ctrl+C
-	//Il comando go avvia una goroutine parallela, se legge qualcosa da stopper significa che
-	//c'è un segnale di interruzione del processo, chiude il reader del ringbuffer e chiude il programma
 	go func() {
 		<-stopper
-		fmt.Println("\n🛑 Uscita in corso...")
-		rd.Close() // Chiudendo il reader sblocchiamo il for sottostante
-		os.Exit(0)
+		fmt.Println("\n🛑 Interruzione ricevuta. Generazione report JSON in corso...")
+		// Rimosso os.Exit(0). Chiudiamo il reader per sbloccare il ciclo for.
+		rd.Close()
 	}()
 
 	fmt.Println("In attesa di eventi...")
@@ -129,7 +131,7 @@ func main() {
 		if err != nil {
 			// Se l'errore è dovuto alla chiusura del file (da parte di Ctrl+C), usciamo in silenzio
 			if errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, os.ErrClosed) || strings.Contains(err.Error(), "file already closed") {
-				return
+				break
 			}
 			log.Printf("Errore lettura ringbuf: %v", err)
 			continue
@@ -155,9 +157,9 @@ func main() {
 		//aggiungendo al tempo di boot i nanosecondi in cui si è verificato l'evento
 		eventTime := bootTime.Add(time.Duration(info.TimestampNs))
 		timeStr := eventTime.Format("15:04:05.000000")
-
+		syscallName := getSyscallName(info.SyscallId)
 		fmt.Printf("\n🕒 [%s] 🔹 Syscall: %-15s (ID: %d) | Stack ID: %d\n",
-			timeStr, getSyscallName(info.SyscallId), info.SyscallId, info.StackId)
+			timeStr, syscallName, info.SyscallId, info.StackId)
 
 		// ---------------------------------------------------------
 		// RISOLUZIONE BATCH (una sola chiamata a BlazeSym)
@@ -180,6 +182,61 @@ func main() {
 			for i, funcName := range resolvedNames {
 				fmt.Printf("      [%2d] %s\n", i, funcName)
 			}
+
+			// 4. LOGICA DI DEDUPLICAZIONE E SALVATAGGIO
+			if syscallStacksTracker[syscallName] == nil {
+				syscallStacksTracker[syscallName] = make(map[string][]string)
+			}
+
+			// Uniamo l'intero stack in una stringa usando un delimitatore speciale
+			// Questa stringa fungerà da impronta digitale (hash) univoca per lo stack
+			stackFingerprint := strings.Join(resolvedNames, "|")
+
+			// Inseriamo lo stack nel tracker solo se questa esatta combinazione non esiste già
+			if _, exists := syscallStacksTracker[syscallName][stackFingerprint]; !exists {
+				syscallStacksTracker[syscallName][stackFingerprint] = resolvedNames
+			}
+
 		}
 	}
+
+	// 5. ESPORTAZIONE DEL JSON
+	exportJSON(int(targetPID), syscallStacksTracker)
+}
+
+// Funzione helper per preparare la struttura ed esportare il file JSON
+func exportJSON(pid int, tracker map[string]map[string][]string) {
+	// Struttura finale per il JSON: map[SyscallName]ArrayDiStack(ArrayDiStringhe)
+	finalExportData := make(map[string][][]string)
+
+	for syscall, uniqueStacks := range tracker {
+		var allStacksForSyscall [][]string
+		for _, stack := range uniqueStacks {
+			allStacksForSyscall = append(allStacksForSyscall, stack)
+		}
+
+		if len(allStacksForSyscall) > 0 {
+			finalExportData[syscall] = allStacksForSyscall
+		}
+	}
+
+	if len(finalExportData) == 0 {
+		fmt.Println("\n⚠️ Nessun dato intercettato, file JSON non creato.")
+		return
+	}
+
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("stacks_report_pid%d_%s.json", pid, timestamp)
+
+	// MarshalIndent crea un JSON leggibile (pretty print)
+	fileData, err := json.MarshalIndent(finalExportData, "", "  ")
+	if err != nil {
+		log.Fatalf("Errore durante la codifica del JSON: %v", err)
+	}
+
+	if err := os.WriteFile(filename, fileData, 0644); err != nil {
+		log.Fatalf("Errore durante la scrittura del file JSON: %v", err)
+	}
+
+	fmt.Printf("\n✅ Report completo esportato con successo in: %s\n", filename)
 }
