@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -234,9 +235,17 @@ func exportJSON(pid int, tracker map[string]map[string][]string) {
 		log.Fatalf("Errore durante la codifica del JSON: %v", err)
 	}
 
-	if err := os.WriteFile(filename, fileData, 0644); err != nil {
+	reportDir := "report"
+
+	if err := os.MkdirAll(reportDir, 0755); err != nil {
+		log.Fatalf("Errore durante la creazione della cartella '%s': %v", reportDir, err)
+	}
+
+	fullPath := filepath.Join(reportDir, filename)
+
+	if err := os.WriteFile(fullPath, fileData, 0644); err != nil {
 		log.Fatalf("Errore durante la scrittura del file JSON: %v", err)
 	}
 
-	fmt.Printf("\n✅ Report completo esportato con successo in: %s\n", filename)
+	fmt.Printf("\n✅ Report completo esportato con successo in: %s\n", fullPath)
 }
