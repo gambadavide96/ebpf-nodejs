@@ -8,7 +8,7 @@ const fs = require('fs');
     const wasmBuffer = fs.readFileSync('math.wasm');
 
     // 2. Compiliamo e instanziamo il modulo WebAssembly al volo
-    // (V8 lo trasforma dal formato .wasm al codice macchina della tua CPU)
+    // (V8 lo trasforma dal formato .wasm al codice macchina della CPU)
     const wasmModule = await WebAssembly.instantiate(wasmBuffer);
 
     // 3. Estraiamo le funzioni che abbiamo esportato dal C!
