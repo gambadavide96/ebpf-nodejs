@@ -5,13 +5,11 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,8 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Struttura gemella. Nota l'ordine: Timestamp per primo!
-// Essendo 8 + 4 + 4 byte = 16 byte precisi, non ci serve il padding ("_ uint32").
+// RINGBUFFER INFO STRUCTURE
 type SyscallInfo struct {
 	TimestampNs uint64
 	SyscallId   uint32
@@ -51,7 +48,7 @@ func getSyscallName(id uint32) string {
 func main() {
 	//os.Args array di stringhe passate in input, 0 è il nome del programma e 1 il PID
 	if len(os.Args) < 2 {
-		log.Fatalf("Uso corretto: sudo ./monitor <PID_NODEJS>")
+		log.Fatalf("Correct use: sudo ./monitor <PID_NODEJS>")
 	}
 
 	//conversione PID da stringa a intero
@@ -67,7 +64,7 @@ func main() {
 
 	objs := traceObjects{}
 	//Inietta nel kernel il bytecode eBPF compilato, crea le mappe e valida il programma
-	//poi inserisce in objs i file descriptor che collegano Go al programma ebpf nel kernel
+	//poi inserisce in objs i file descriptor che collegano Go al programma ebpf nel kernel.
 	if err := loadTraceObjects(&objs, nil); err != nil {
 		log.Fatalf("Errore caricamento oggetti: %v", err)
 	}
@@ -85,14 +82,16 @@ func main() {
 	}
 	defer tp.Close()
 
-	fmt.Printf("🔍 Monitoraggio stack trace per PID %d avviato (RING BUFFER).\n", targetPID)
+	fmt.Printf("🔍 Monitoraggio stack trace per PID %d avviato.\n", targetPID)
 
-	// 1. INIZIALIZZAZIONE STRUTTURA DATI PER IL TRACKING
+	// INIZIALIZZAZIONE STRUTTURA DATI PER IL TRACKING
 	// Struttura: map[NomeSyscall]map[ChiaveStackUnica]ArrayDiFunzioni
 	syscallStacksTracker := make(map[string]map[string][]string)
 
+	//INIZIALIZZAZIONE BLAZESYM
 	symb := NewBlazeSymbolizer(int(targetPID))
 
+	//CALCOLO ISTANTE ESATTO
 	var ts unix.Timespec
 	//Riempe ts con i secondi ed i nanosecondi da quando la macchina è accesa
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
@@ -104,9 +103,9 @@ func main() {
 	bootTime := time.Now().Add(-time.Duration(uptimeNs))
 
 	// 1. INIZIALIZZIAMO IL LETTORE DEL RING BUFFER
-	rd, err := ringbuf.NewReader(objs.Events) // "Events" è il ring buffer definito in C
+	rd, err := ringbuf.NewReader(objs.Events) // "Events" is the ring buffer defined in C
 	if err != nil {
-		log.Fatalf("Errore apertura ringbuf reader: %v", err)
+		log.Fatalf("Error on opening ringbuf reader: %v", err)
 	}
 	defer rd.Close()
 
@@ -164,10 +163,10 @@ func main() {
 			timeStr, syscallName, info.SyscallId, info.StackId)
 
 		// ---------------------------------------------------------
-		// RISOLUZIONE BATCH (una sola chiamata a BlazeSym)
+		// RISOLUZIONE BATCH (one call to BlazeSym)
 		// ---------------------------------------------------------
 
-		// 1. Estraiamo solo gli IP validi (interrompiamo al primo 0)
+		// 1. Estraiamo solo gli IP (instructions pointers) validi (interrompiamo al primo 0)
 		var validIPs []uint64
 		for _, ip := range stackFrames {
 			if ip == 0 {
@@ -176,7 +175,7 @@ func main() {
 			validIPs = append(validIPs, ip)
 		}
 
-		// 2. Se ci sono IP da risolvere, li passiamo tutti insieme a Blazesym
+		// 2. Se ci sono IP da risolvere, li passiamo in una sola chiamata a Blazesym
 		if len(validIPs) > 0 {
 			resolvedNames := symb.ResolveBatch(validIPs)
 
@@ -185,16 +184,17 @@ func main() {
 				fmt.Printf("      [%2d] %s\n", i, funcName)
 			}
 
-			// 4. LOGICA DI DEDUPLICAZIONE E SALVATAGGIO
+			// 4. CREAZIONE MAPPA SYSCALL - STACK TRACE
+			// Se non esiste una chiave per la syscall intercettata, la creo.
 			if syscallStacksTracker[syscallName] == nil {
 				syscallStacksTracker[syscallName] = make(map[string][]string)
 			}
 
 			// Uniamo l'intero stack in una stringa usando un delimitatore speciale
-			// Questa stringa fungerà da impronta digitale (hash) univoca per lo stack
+			// Questa stringa serve impronta digitale (hash) univoca per lo stack
 			stackFingerprint := strings.Join(resolvedNames, "|")
 
-			// Inseriamo lo stack nel tracker solo se questa esatta combinazione non esiste già
+			// Per evitare duplicati, inseriamo lo stack catturato nella mappa solo se la sua firma non esiste già.
 			if _, exists := syscallStacksTracker[syscallName][stackFingerprint]; !exists {
 				syscallStacksTracker[syscallName][stackFingerprint] = resolvedNames
 			}
@@ -202,51 +202,12 @@ func main() {
 		}
 	}
 
-	// 5. ESPORTAZIONE DEL JSON
-	exportJSON(int(targetPID), syscallStacksTracker)
-}
+	//5. COSTRUZIONE MAPPA FUNZIONE -> SYSCALL
+	// 5. COSTRUZIONE MAPPA COMPORTAMENTALE (Delegata a functionProfiler.go)
+	functionSyscallsProfile := BuildFunctionProfile(syscallStacksTracker)
 
-// Funzione helper per preparare la struttura ed esportare il file JSON
-func exportJSON(pid int, tracker map[string]map[string][]string) {
-	// Struttura finale per il JSON: map[SyscallName]ArrayDiStack(ArrayDiStringhe)
-	finalExportData := make(map[string][][]string)
+	// 6. ESPORTAZIONE DEI FILE JSON
+	exportJSONSyscalls(int(targetPID), syscallStacksTracker)
+	exportJSONFunctions(int(targetPID), functionSyscallsProfile)
 
-	for syscall, uniqueStacks := range tracker {
-		var allStacksForSyscall [][]string
-		for _, stack := range uniqueStacks {
-			allStacksForSyscall = append(allStacksForSyscall, stack)
-		}
-
-		if len(allStacksForSyscall) > 0 {
-			finalExportData[syscall] = allStacksForSyscall
-		}
-	}
-
-	if len(finalExportData) == 0 {
-		fmt.Println("\n⚠️ Nessun dato intercettato, file JSON non creato.")
-		return
-	}
-
-	timestamp := time.Now().Format("20060102_150405")
-	filename := fmt.Sprintf("stacks_report_pid%d_%s.json", pid, timestamp)
-
-	// MarshalIndent crea un JSON leggibile (pretty print)
-	fileData, err := json.MarshalIndent(finalExportData, "", "  ")
-	if err != nil {
-		log.Fatalf("Errore durante la codifica del JSON: %v", err)
-	}
-
-	reportDir := "report"
-
-	if err := os.MkdirAll(reportDir, 0755); err != nil {
-		log.Fatalf("Errore durante la creazione della cartella '%s': %v", reportDir, err)
-	}
-
-	fullPath := filepath.Join(reportDir, filename)
-
-	if err := os.WriteFile(fullPath, fileData, 0644); err != nil {
-		log.Fatalf("Errore durante la scrittura del file JSON: %v", err)
-	}
-
-	fmt.Printf("\n✅ Report completo esportato con successo in: %s\n", fullPath)
 }
