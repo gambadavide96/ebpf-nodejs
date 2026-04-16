@@ -13,6 +13,7 @@ import (
 type FunctionProfileOutput struct {
 	Type     string   `json:"type"`     // Es: "NPM", "WASM", "JS_LOCAL"
 	Function string   `json:"function"` // Il nome della funzione
+	Path     string   `json:"path"`     // Percorso
 	Syscalls []string `json:"syscalls"` // La lista delle syscall invocate
 }
 
@@ -78,6 +79,7 @@ func exportJSONFunctions(pid int, profile map[FuncInfo]map[string]bool) {
 		outputData = append(outputData, FunctionProfileOutput{
 			Type:     funcInfo.Type,
 			Function: funcInfo.Name,
+			Path:     funcInfo.Path,
 			Syscalls: syscallList,
 		})
 	}
