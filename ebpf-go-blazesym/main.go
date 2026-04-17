@@ -203,7 +203,6 @@ func main() {
 	}
 
 	//5. COSTRUZIONE MAPPA FUNZIONE -> SYSCALL
-	// 5. COSTRUZIONE MAPPA COMPORTAMENTALE (Delegata a functionProfiler.go)
 	functionSyscallsProfile := BuildFunctionProfile(syscallStacksTracker)
 
 	// 6. ESPORTAZIONE DEI FILE JSON
