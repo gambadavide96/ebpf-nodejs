@@ -4,16 +4,14 @@
 #include <bpf/bpf_helpers.h>
 
 
-// RING BUFFER INFO STRUCTURE
-// Mettendo il dato più grande (8 byte) per primo, e i due 
-// da 4 byte dopo, raggiungiamo esattamente 16 byte.
+//INFO STRUCTURE
 struct my_syscall_info {
     __u64 timestamp_ns; // 8 byte
     __u32 syscall_id;   // 4 byte
     int   stack_id;     // 4 byte
 }; 
 
-// ARRAY MAP to filter the PID, with only one entry
+// ARRAY MAP to filter the main PID, with only one entry
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __type(key, __u32);

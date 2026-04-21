@@ -62,9 +62,11 @@ func main() {
 		log.Fatal(err)
 	}
 
+	//Injects the compiled eBPF bytecode into the kernel, creates the maps,
+	//and validates the program.
+	//Then inserts the file descriptors that connect Go to the ebpf program
+	// in the kernel into objs.
 	objs := traceObjects{}
-	//Inietta nel kernel il bytecode eBPF compilato, crea le mappe e valida il programma
-	//poi inserisce in objs i file descriptor che collegano Go al programma ebpf nel kernel.
 	if err := loadTraceObjects(&objs, nil); err != nil {
 		log.Fatalf("Errore caricamento oggetti: %v", err)
 	}
@@ -85,11 +87,11 @@ func main() {
 	fmt.Printf("🔍 Monitoraggio stack trace per PID %d avviato.\n", targetPID)
 
 	// INIZIALIZZAZIONE STRUTTURA DATI PER IL TRACKING
-	// Struttura: map[NomeSyscall]map[ChiaveStackUnica]ArrayDiFunzioni
+	// Struttura: map[NomeSyscall]map[ChiaveStackUnica][]StackFrames
 	syscallStacksTracker := make(map[string]map[string][]string)
 
 	//INIZIALIZZAZIONE BLAZESYM
-	symb := NewBlazeSymbolizer(int(targetPID))
+	symb := NewBlazeSymbolizer()
 
 	//CALCOLO ISTANTE ESATTO
 	var ts unix.Timespec
@@ -177,7 +179,7 @@ func main() {
 
 		// 2. Se ci sono IP da risolvere, li passiamo in una sola chiamata a Blazesym
 		if len(validIPs) > 0 {
-			resolvedNames := symb.ResolveBatch(validIPs)
+			resolvedNames := symb.ResolveBatch(validIPs, uint32(targetPID))
 
 			// 3. Stampiamo i risultati formattati
 			for i, funcName := range resolvedNames {
