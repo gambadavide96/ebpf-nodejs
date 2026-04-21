@@ -38,6 +38,7 @@ func classifyFrame(raw string) (funcInfo FuncInfo, isUserLand bool) {
 		strings.HasPrefix(raw, "int node") || // Firme C++ demangled con tipo di ritorno
 		strings.Contains(raw, "LINUX_2.6") || // Stub VDSO del kernel legacy
 		strings.Contains(raw, "{virtual override thunk") ||
+		strings.Contains(raw, "\u003c") ||
 		isLibcWrapper(raw) { // Funzioni dirette libc (read, ioctl...)
 		return FuncInfo{}, false
 	}
