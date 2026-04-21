@@ -103,7 +103,7 @@ func main() {
 	bootTime := time.Now().Add(-time.Duration(uptimeNs))
 
 	// 1. INIZIALIZZIAMO IL LETTORE DEL RING BUFFER
-	rd, err := ringbuf.NewReader(objs.Events) // "Events" is the ring buffer defined in C
+	rd, err := ringbuf.NewReader(objs.RingBuffer) // "RingBuffer" is the ring buffer defined in C
 	if err != nil {
 		log.Fatalf("Error on opening ringbuf reader: %v", err)
 	}

@@ -33,7 +33,7 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024); // Creating 256 Kilobyte buffer
-} events SEC(".maps");
+} ring_buffer SEC(".maps");
 
 // Structure for raw_syscalls/sys_enter
 struct sys_enter_args {
@@ -65,7 +65,7 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
 
     // PRENOTIAMO LO SPAZIO NEL RING BUFFER
     // Chiediamo al kernel un blocco di 16 byte. Se il buffer è pieno, restituisce NULL.
-    struct my_syscall_info *info = bpf_ringbuf_reserve(&events, sizeof(*info), 0);
+    struct my_syscall_info *info = bpf_ringbuf_reserve(&ring_buffer, sizeof(*info), 0);
     if (!info) {
         return 0; // Buffer temporaneamente pieno, evento scartato
     }
