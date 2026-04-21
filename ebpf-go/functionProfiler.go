@@ -56,7 +56,7 @@ func classifyFrame(raw string) (funcInfo FuncInfo, isUserLand bool) {
 		parts := strings.SplitN(cleanString, " ", 2)
 		funcName := parts[0]
 		if funcName == "" {
-			funcName = "<anonymous>"
+			return FuncInfo{}, false
 		}
 
 		path := "unknown"
