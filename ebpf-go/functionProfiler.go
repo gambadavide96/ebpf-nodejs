@@ -133,6 +133,7 @@ func BuildFunctionProfile(syscallStacksTracker map[string]map[string][]string) m
 					}
 
 					functionProfile[info][syscallName] = true
+					break
 				}
 			}
 		}
