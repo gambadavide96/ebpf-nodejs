@@ -24,115 +24,113 @@ import (
 )
 
 // RINGBUFFER INFO STRUCTURE
+// Aggiornata per corrispondere ai 20 byte del Kernel (8 + 4 + 4 + 4)
 type SyscallInfo struct {
 	TimestampNs uint64
+	Pid         uint32 // Identificatore del processo
 	SyscallId   uint32
 	StackId     int32
 }
 
-// traduce dinamicamente l'ID della syscall nel suo nome
-// interrogando il Kernel tramite libseccomp
+// getSyscallName traduce dinamicamente l'ID della syscall nel suo nome
 func getSyscallName(id uint32) string {
 	scmpSyscall := seccomp.ScmpSyscall(id)
-
 	name, err := scmpSyscall.GetName()
 	if err != nil {
-		// Se la syscall non esiste o non è
-		// riconosciuta su questa architettura, stampa il numero grezzo.
 		return fmt.Sprintf("syscall_%d", id)
 	}
-
 	return name
 }
 
 func main() {
-	//os.Args array di stringhe passate in input, 0 è il nome del programma e 1 il PID
 	if len(os.Args) < 2 {
-		log.Fatalf("Correct use: sudo ./monitor <PID_NODEJS>")
+		log.Fatalf("Uso corretto: sudo ./monitor <PID_NODEJS>")
 	}
 
-	//conversione PID da stringa a intero
 	targetPID, err := strconv.ParseUint(os.Args[1], 10, 32)
 	if err != nil {
 		log.Fatalf("PID non valido: %v", err)
 	}
 
-	//Removes the limit on the amount of memory the current process can lock into RAM
+	// Rimuove il limite di memoria bloccabile in RAM
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal(err)
 	}
 
-	//Injects the compiled eBPF bytecode into the kernel, creates the maps,
-	//and validates the program.
-	//Then inserts the file descriptors that connect Go to the ebpf program
-	// in the kernel into objs.
+	// Caricamento oggetti eBPF nel Kernel
 	objs := traceObjects{}
 	if err := loadTraceObjects(&objs, nil); err != nil {
 		log.Fatalf("Errore caricamento oggetti: %v", err)
 	}
 	defer objs.Close()
 
-	//Inserisco nella mappa eBPF il target PID passato dall'utente
-	key := uint32(0)
-	val := uint32(targetPID)
-	objs.TargetPidMap.Put(&key, &val)
-
-	//Aggagancia la funzione trace_sys_enter definita in trace.c a sysenter
-	tp, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
-	if err != nil {
-		log.Fatalf("Errore aggancio tracepoint: %v", err)
+	// 1. INIZIALIZZAZIONE MAPPA PID (HASH MAP)
+	// La chiave è il PID, il valore è 1 (true, per indicare che è tracciato)
+	pidKey := uint32(targetPID)
+	pidVal := uint32(1)
+	if err := objs.TargetPidMap.Put(&pidKey, &pidVal); err != nil {
+		log.Fatalf("Errore inserimento PID nella mappa: %v", err)
 	}
-	defer tp.Close()
 
-	fmt.Printf("🔍 Monitoraggio stack trace per PID %d avviato.\n", targetPID)
+	// 2. AGGANCIO DEI TRACEPOINT
+	tpSys, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
+	if err != nil {
+		log.Fatalf("Errore aggancio trace_sys_enter : %v", err)
+	}
+	defer tpSys.Close()
 
-	// INIZIALIZZAZIONE STRUTTURA DATI PER IL TRACKING
-	// Struttura: map[NomeSyscall]map[ChiaveStackUnica][]StackFrames
-	syscallStacksTracker := make(map[string]map[string][]string)
+	tpFork, err := link.Tracepoint("sched", "sched_process_fork", objs.TraceFork, nil)
+	if err != nil {
+		log.Fatalf("Errore aggancio trace_fork: %v", err)
+	}
+	defer tpFork.Close()
 
-	//INIZIALIZZAZIONE BLAZESYM
+	tpExit, err := link.Tracepoint("sched", "sched_process_exit", objs.TraceExit, nil)
+	if err != nil {
+		log.Fatalf("Errore aggancio trace_exit: %v", err)
+	}
+	defer tpExit.Close()
+
+	fmt.Printf("🔍 Monitoraggio Process Tree avviato. PID principale: %d e futuri figli...\n", targetPID)
+
+	// 3. STRUTTURA DATI GERARCHICA (Multi-PID)
+	// Struttura: map[PID]map[NomeSyscall]map[ChiaveStackUnica][]StackFrames
+	syscallStacksTracker := make(map[uint32]map[string]map[string][]string)
+
+	// INIZIALIZZAZIONE BLAZESYM (Senza stato)
 	symb := NewBlazeSymbolizer()
 
-	//CALCOLO ISTANTE ESATTO
+	// Gestione orario eventi
 	var ts unix.Timespec
-	//Riempe ts con i secondi ed i nanosecondi da quando la macchina è accesa
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
 		log.Fatalf("Impossibile leggere il clock di sistema: %v", err)
 	}
-	//Tempo totale di accensione in nanosecondi
 	uptimeNs := uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
-	//Calcolo istante esatto(data e ora) di accensione della macchina
 	bootTime := time.Now().Add(-time.Duration(uptimeNs))
 
-	// 1. INIZIALIZZIAMO IL LETTORE DEL RING BUFFER
-	rd, err := ringbuf.NewReader(objs.RingBuffer) // "RingBuffer" is the ring buffer defined in C
+	// Lettore del Ring Buffer
+	rd, err := ringbuf.NewReader(objs.RingBuffer)
 	if err != nil {
 		log.Fatalf("Error on opening ringbuf reader: %v", err)
 	}
 	defer rd.Close()
 
-	//Creiamo stopper per ricevere messaggi di tipo os.Signal
+	// Intercettazione segnali di chiusura (Ctrl+C)
 	stopper := make(chan os.Signal, 1)
-	//se l'utente preme Ctrl+C (os.Interrupt) o cerca di interrompere il processo (SIGTERM)
-	//prendi quel segnale e mettilo in stopper
 	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-stopper
-		fmt.Println("\n🛑 Interruzione ricevuta. Generazione report JSON in corso...")
-		// Rimosso os.Exit(0). Chiudiamo il reader per sbloccare il ciclo for.
+		fmt.Println("\n🛑 Interruzione ricevuta. Generazione report multi-processo in corso...")
 		rd.Close()
 	}()
 
 	fmt.Println("In attesa di eventi...")
 
-	// 2. CICLO INFINITO BLOCCANTE
+	// 4. CICLO INFINITO BLOCCANTE
 	for {
-		// Il programma si "addormenta" qui finché il kernel non invia un evento
-		//ogni volta che arriva un evento nel buffer, viene messo in record
 		record, err := rd.Read()
 		if err != nil {
-			// Se l'errore è dovuto alla chiusura del file (da parte di Ctrl+C), usciamo in silenzio
 			if errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, os.ErrClosed) || strings.Contains(err.Error(), "file already closed") {
 				break
 			}
@@ -140,35 +138,30 @@ func main() {
 			continue
 		}
 
-		// 3. DECODIFICA BINARIA
-		// Trasformiamo i 16 byte grezzi (record.RawSample) nella nostra Go SyscallInfo
+		// Decodifica Binaria
 		var info SyscallInfo
-		//Read taglia i byte letti in 8+4+4 e li assegna alla struct info che abbiamo definito
 		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &info); err != nil {
 			log.Printf("Errore decodifica evento: %v", err)
 			continue
 		}
 
-		// Andiamo a ripescare i dettagli dello stack tramite lo stack id (nella mappa StackMap)
+		// Recupero indirizzi dallo StackMap
 		var stackFrames [127]uint64
 		err = objs.StackMap.Lookup(&info.StackId, &stackFrames)
 		if err != nil {
 			continue
 		}
 
-		//Ricavo data ed ora esatta in cui si è verificato l'evento
-		//aggiungendo al tempo di boot i nanosecondi in cui si è verificato l'evento
 		eventTime := bootTime.Add(time.Duration(info.TimestampNs))
 		timeStr := eventTime.Format("15:04:05.000000")
 		syscallName := getSyscallName(info.SyscallId)
-		fmt.Printf("\n🕒 [%s] 🔹 Syscall: %-15s (ID: %d) | Stack ID: %d\n",
-			timeStr, syscallName, info.SyscallId, info.StackId)
+
+		fmt.Printf("\n🕒 [%s] [PID: %d] 🔹 Syscall: %-15s (ID: %d) | Stack ID: %d\n",
+			timeStr, info.Pid, syscallName, info.SyscallId, info.StackId)
 
 		// ---------------------------------------------------------
-		// RISOLUZIONE BATCH (one call to BlazeSym)
+		// RISOLUZIONE BATCH DINAMICA
 		// ---------------------------------------------------------
-
-		// 1. Estraiamo solo gli IP (instructions pointers) validi (interrompiamo al primo 0)
 		var validIPs []uint64
 		for _, ip := range stackFrames {
 			if ip == 0 {
@@ -177,38 +170,37 @@ func main() {
 			validIPs = append(validIPs, ip)
 		}
 
-		// 2. Se ci sono IP da risolvere, li passiamo in una sola chiamata a Blazesym
 		if len(validIPs) > 0 {
-			resolvedNames := symb.ResolveBatch(validIPs, uint32(targetPID))
+			// Passiamo il PID specifico dell'evento al traduttore!
+			resolvedNames := symb.ResolveBatch(validIPs, info.Pid)
 
-			// 3. Stampiamo i risultati formattati
 			for i, funcName := range resolvedNames {
 				fmt.Printf("      [%2d] %s\n", i, funcName)
 			}
 
-			// 4. CREAZIONE MAPPA SYSCALL - STACK TRACE
-			// Se non esiste una chiave per la syscall intercettata, la creo.
-			if syscallStacksTracker[syscallName] == nil {
-				syscallStacksTracker[syscallName] = make(map[string][]string)
+			// Inizializzazione sicura della mappa per questo PID specifico
+			if syscallStacksTracker[info.Pid] == nil {
+				syscallStacksTracker[info.Pid] = make(map[string]map[string][]string)
+			}
+			if syscallStacksTracker[info.Pid][syscallName] == nil {
+				syscallStacksTracker[info.Pid][syscallName] = make(map[string][]string)
 			}
 
-			// Uniamo l'intero stack in una stringa usando un delimitatore speciale
-			// Questa stringa serve impronta digitale (hash) univoca per lo stack
+			// Salvataggio impronta stack
 			stackFingerprint := strings.Join(resolvedNames, "|")
 
-			// Per evitare duplicati, inseriamo lo stack catturato nella mappa solo se la sua firma non esiste già.
-			if _, exists := syscallStacksTracker[syscallName][stackFingerprint]; !exists {
-				syscallStacksTracker[syscallName][stackFingerprint] = resolvedNames
+			if _, exists := syscallStacksTracker[info.Pid][syscallName][stackFingerprint]; !exists {
+				syscallStacksTracker[info.Pid][syscallName][stackFingerprint] = resolvedNames
 			}
-
 		}
 	}
 
-	//5. COSTRUZIONE MAPPA FUNZIONE -> SYSCALL
+	// 5. AGGREGAZIONE DEL PROFILO E ESPORTAZIONE
 	functionSyscallsProfile := BuildFunctionProfile(syscallStacksTracker)
 
-	// 6. ESPORTAZIONE DEI FILE JSON
-	exportJSONSyscalls(int(targetPID), syscallStacksTracker)
-	exportJSONFunctions(int(targetPID), functionSyscallsProfile)
+	// L'esportatore Stacks prenderà l'intera mappa e creerà file separati per ogni PID
+	exportJSONSyscalls(syscallStacksTracker)
 
+	// L'esportatore Profilo prenderà i dati aggregati e salverà il quadro generale
+	exportJSONFunctions(int(targetPID), functionSyscallsProfile)
 }

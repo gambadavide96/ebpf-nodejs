@@ -32,14 +32,6 @@ var noiseContains = []string{
 	"LINUX_2.6", "{virtual override thunk", "\u003c",
 }
 
-// libcNoise contiene funzioni standard del C che non sono system call dirette,
-// ma che fungono da wrapper di alto livello (e che quindi vogliamo ignorare).
-var libcNoise = []string{
-	"fseek", "fopen", "fclose", "fread", "fwrite", "fflush",
-	"malloc", "calloc", "realloc", "free",
-	"printf", "fprintf", "sprintf", "puts",
-}
-
 // isNoise verifica se il frame corrisponde a logiche interne da ignorare
 func isNoise(raw string) bool {
 	for _, prefix := range noisePrefixes {
@@ -115,24 +107,38 @@ func classifyFrame(raw string) (FuncInfo, bool) {
 	return FuncInfo{Name: raw, Type: TypeNativeCPP, Path: "native-binary"}, true
 }
 
-// BuildFunctionProfile prende in input tutti gli stack tracciati da eBPF
-// e restituisce la mappa pulita: Funzione -> Syscalls
-func BuildFunctionProfile(syscallStacksTracker map[string]map[string][]string) map[FuncInfo]map[string]bool {
-	// Manteniamo la struttura dati richiesta per compatibilità con l'esportazione JSON
+// BuildFunctionProfile prende in input tutti gli stack tracciati da eBPF (divisi per PID)
+// e restituisce un'UNICA mappa aggregata globale: Funzione -> Syscalls
+func BuildFunctionProfile(tracker map[uint32]map[string]map[string][]string) map[FuncInfo]map[string]bool {
+	// Inizializziamo la mappa del profilo comportamentale globale
 	functionProfile := make(map[FuncInfo]map[string]bool)
 
-	for syscallName, fingerprints := range syscallStacksTracker {
-		for _, stackFrames := range fingerprints {
-			for _, frame := range stackFrames {
+	// 1. Iteriamo su tutti i PID intercettati (Padre + eventuali Figli)
+	for _ /*pid*/, pidTracker := range tracker {
 
-				// Sfruttiamo l'inizializzazione inline dell'if tipica di Go
-				if info, isUserLand := classifyFrame(frame); isUserLand {
+		// 2. Iteriamo sulle syscall di quello specifico processo
+		for syscallName, fingerprints := range pidTracker {
 
-					if functionProfile[info] == nil {
-						functionProfile[info] = make(map[string]bool)
+			// 3. Iteriamo sugli stack trace
+			for _, stackFrames := range fingerprints {
+
+				// 4. Scendiamo lungo lo stack per trovare il colpevole
+				for _, frame := range stackFrames {
+
+					// Trovata la funzione User-Land!
+					if info, isUserLand := classifyFrame(frame); isUserLand {
+
+						if functionProfile[info] == nil {
+							functionProfile[info] = make(map[string]bool)
+						}
+
+						// Assegnamo la syscall alla funzione aggregando i dati di tutti i PID
+						functionProfile[info][syscallName] = true
+
+						// 🚨 INTERRUZIONE FONDAMENTALE 🚨
+						// Impedisce di spalmare la syscall su tutto l'albero delle chiamate
+						break
 					}
-
-					functionProfile[info][syscallName] = true
 				}
 			}
 		}
