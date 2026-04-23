@@ -23,8 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// RINGBUFFER INFO STRUCTURE
-// Aggiornata per corrispondere ai 20 byte del Kernel (8 + 4 + 4 + 4)
+// INFO STRUCTURE
 type SyscallInfo struct {
 	TimestampNs uint64
 	Pid         uint32 // Identificatore del processo
@@ -32,7 +31,7 @@ type SyscallInfo struct {
 	StackId     int32
 }
 
-// getSyscallName traduce dinamicamente l'ID della syscall nel suo nome
+// getSyscallName use seccomp to translate syscall ID in syscall name
 func getSyscallName(id uint32) string {
 	scmpSyscall := seccomp.ScmpSyscall(id)
 	name, err := scmpSyscall.GetName()
@@ -44,88 +43,87 @@ func getSyscallName(id uint32) string {
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatalf("Uso corretto: sudo ./monitor <PID_NODEJS>")
+		log.Fatalf("Correct use: sudo ./monitor <PID_NODEJS>")
 	}
 
 	targetPID, err := strconv.ParseUint(os.Args[1], 10, 32)
 	if err != nil {
-		log.Fatalf("PID non valido: %v", err)
+		log.Fatalf("PID not valid: %v", err)
 	}
 
-	// Rimuove il limite di memoria bloccabile in RAM
+	// Removes the lockable memory limit in RAM
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal(err)
 	}
 
-	// Caricamento oggetti eBPF nel Kernel
+	// Loading eBPF objects
 	objs := traceObjects{}
 	if err := loadTraceObjects(&objs, nil); err != nil {
-		log.Fatalf("Errore caricamento oggetti: %v", err)
+		log.Fatalf("Error on loading objects: %v", err)
 	}
 	defer objs.Close()
 
-	// 1. INIZIALIZZAZIONE MAPPA PID (HASH MAP)
-	// La chiave è il PID, il valore è 1 (true, per indicare che è tracciato)
+	// Hash map Pids initialization
 	pidKey := uint32(targetPID)
 	pidVal := uint32(1)
 	if err := objs.TargetPidMap.Put(&pidKey, &pidVal); err != nil {
-		log.Fatalf("Errore inserimento PID nella mappa: %v", err)
+		log.Fatalf("Error on insert PID in Hash map : %v", err)
 	}
 
-	// 2. AGGANCIO DEI TRACEPOINT
+	// Setting Tracepoint
 	tpSys, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
 	if err != nil {
-		log.Fatalf("Errore aggancio trace_sys_enter : %v", err)
+		log.Fatalf("Trace_sys_enter hook error : %v", err)
 	}
 	defer tpSys.Close()
 
 	tpFork, err := link.Tracepoint("sched", "sched_process_fork", objs.TraceFork, nil)
 	if err != nil {
-		log.Fatalf("Errore aggancio trace_fork: %v", err)
+		log.Fatalf("Trace_fork hook error: %v", err)
 	}
 	defer tpFork.Close()
 
 	tpExit, err := link.Tracepoint("sched", "sched_process_exit", objs.TraceExit, nil)
 	if err != nil {
-		log.Fatalf("Errore aggancio trace_exit: %v", err)
+		log.Fatalf("Trace_exit hook error: %v", err)
 	}
 	defer tpExit.Close()
 
-	fmt.Printf("🔍 Monitoraggio Process Tree avviato. PID principale: %d e futuri figli...\n", targetPID)
+	fmt.Printf("🔍 Process Tree Monitoring started. Main PID: %d\n", targetPID)
 
-	// 3. STRUTTURA DATI GERARCHICA (Multi-PID)
-	// Struttura: map[PID]map[NomeSyscall]map[ChiaveStackUnica][]StackFrames
+	// HIERARCHICAL DATA STRUCTURE (Multi-PID)
+	// Structure: map[PID]map[SyscallName]map[StackFingerprint][]StackFrames
 	syscallStacksTracker := make(map[uint32]map[string]map[string][]string)
 
-	// INIZIALIZZAZIONE BLAZESYM (Senza stato)
+	// Blazesym initialization
 	symb := NewBlazeSymbolizer()
 
-	// Gestione orario eventi
+	// Manage Time events
 	var ts unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
-		log.Fatalf("Impossibile leggere il clock di sistema: %v", err)
+		log.Fatalf("Unable to read system clock: %v", err)
 	}
 	uptimeNs := uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 	bootTime := time.Now().Add(-time.Duration(uptimeNs))
 
-	// Lettore del Ring Buffer
+	// Ring Buffer reader
 	rd, err := ringbuf.NewReader(objs.RingBuffer)
 	if err != nil {
 		log.Fatalf("Error on opening ringbuf reader: %v", err)
 	}
 	defer rd.Close()
 
-	// Intercettazione segnali di chiusura (Ctrl+C)
+	// Intercepting closing signals (Ctrl+C)
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-stopper
-		fmt.Println("\n🛑 Interruzione ricevuta. Generazione report multi-processo in corso...")
+		fmt.Println("\n🛑 Interruption received.")
 		rd.Close()
 	}()
 
-	fmt.Println("In attesa di eventi...")
+	fmt.Println("Waiting events...")
 
 	// 4. CICLO INFINITO BLOCCANTE
 	for {
