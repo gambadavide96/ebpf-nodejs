@@ -125,25 +125,25 @@ func main() {
 
 	fmt.Println("Waiting events...")
 
-	// 4. CICLO INFINITO BLOCCANTE
 	for {
+		//Reading data from ringbuffer
 		record, err := rd.Read()
 		if err != nil {
 			if errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, os.ErrClosed) || strings.Contains(err.Error(), "file already closed") {
 				break
 			}
-			log.Printf("Errore lettura ringbuf: %v", err)
+			log.Printf("Error reading ringbuf: %v", err)
 			continue
 		}
 
-		// Decodifica Binaria
+		// Decoding event
 		var info SyscallInfo
 		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &info); err != nil {
-			log.Printf("Errore decodifica evento: %v", err)
+			log.Printf("Error decoding event: %v", err)
 			continue
 		}
 
-		// Recupero indirizzi dallo StackMap
+		// Retrieving addresses from the StackMap
 		var stackFrames [127]uint64
 		err = objs.StackMap.Lookup(&info.StackId, &stackFrames)
 		if err != nil {
@@ -158,7 +158,7 @@ func main() {
 			timeStr, info.Pid, syscallName, info.SyscallId, info.StackId)
 
 		// ---------------------------------------------------------
-		// RISOLUZIONE BATCH DINAMICA
+		// SYMBOL RESOLUTION
 		// ---------------------------------------------------------
 		var validIPs []uint64
 		for _, ip := range stackFrames {
@@ -169,14 +169,14 @@ func main() {
 		}
 
 		if len(validIPs) > 0 {
-			// Passiamo il PID specifico dell'evento al traduttore!
+			// Passing PID and addresses to blazesym
 			resolvedNames := symb.ResolveBatch(validIPs, info.Pid)
 
 			for i, funcName := range resolvedNames {
 				fmt.Printf("      [%2d] %s\n", i, funcName)
 			}
 
-			// Inizializzazione sicura della mappa per questo PID specifico
+			// Saving PID -> Syscall -> Stack in the map
 			if syscallStacksTracker[info.Pid] == nil {
 				syscallStacksTracker[info.Pid] = make(map[string]map[string][]string)
 			}
@@ -184,7 +184,7 @@ func main() {
 				syscallStacksTracker[info.Pid][syscallName] = make(map[string][]string)
 			}
 
-			// Salvataggio impronta stack
+			// Saving stack fingerprint
 			stackFingerprint := strings.Join(resolvedNames, "|")
 
 			if _, exists := syscallStacksTracker[info.Pid][syscallName][stackFingerprint]; !exists {
@@ -193,12 +193,12 @@ func main() {
 		}
 	}
 
-	// 5. AGGREGAZIONE DEL PROFILO E ESPORTAZIONE
+	// Profile aggregation
 	functionSyscallsProfile := BuildFunctionProfile(syscallStacksTracker)
 
-	// L'esportatore Stacks prenderà l'intera mappa e creerà file separati per ogni PID
+	// JSON Syscall stack traces for each PID
 	exportJSONSyscalls(syscallStacksTracker)
 
-	// L'esportatore Profilo prenderà i dati aggregati e salverà il quadro generale
+	// JSON function profile
 	exportJSONFunctions(int(targetPID), functionSyscallsProfile)
 }
