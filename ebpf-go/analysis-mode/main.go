@@ -203,11 +203,15 @@ func main() {
 	}
 
 	// Profile aggregation
-	functionSyscallsProfile := BuildFunctionProfile(syscallStacksTracker)
+	functionsProfile := BuildFunctionProfile(syscallStacksTracker)
+	packagesProfile := BuildPackageProfile(functionsProfile)
 
 	// JSON Syscall stack traces for each PID
 	exportJSONSyscalls(syscallStacksTracker)
 
 	// JSON function profile
-	exportJSONFunctions(int(targetPID), functionSyscallsProfile)
+	exportJSONFunctions(int(targetPID), functionsProfile)
+
+	//JSON package profile
+	exportJSONPackages(int(targetPID), packagesProfile)
 }

@@ -9,13 +9,19 @@ import (
 	"time"
 )
 
-// FunctionProfileOutput definisce la struttura del JSON finale in stile GoLeash
+// FunctionProfileOutput definisce la struttura del JSON finale a livello di funzione
 type FunctionProfileOutput struct {
 	Type     string `json:"type"`     // Es: "NPM", "NATIVE_ADDON", "JS_LOCAL"
 	Function string `json:"function"` // Il nome della funzione
 	Path     string `json:"path"`     // Percorso del file
 	// Syscalls non è più un array piatto, ma una mappa 3D: Syscall -> HashPath -> Esiste
 	Syscalls map[string]map[string]bool `json:"syscalls"`
+}
+
+// PackageProfileOutput definisce la struttura del JSON finale per la policy di pacchetto
+type PackageProfileOutput struct {
+	Package  string                     `json:"package"`  // Es: "express", "APP_LOCAL"
+	Syscalls map[string]map[string]bool `json:"syscalls"` // Syscall -> HashPath -> true
 }
 
 // exportJSONSyscalls rimane invariata (genera i file RAW separati per processo)
@@ -107,4 +113,40 @@ func exportJSONFunctions(targetPID int, profile map[FuncInfo]map[string]map[stri
 	}
 
 	fmt.Printf("\n📁 Salvato Profilo Comportamentale Globale (GoLeash-Ready) in: %s\n", fullPath)
+}
+
+func exportJSONPackages(targetPID int, profile PackageProfile) {
+	var outputData []PackageProfileOutput
+
+	for pkgName, syscallsMap := range profile {
+		outputData = append(outputData, PackageProfileOutput{
+			Package:  pkgName,
+			Syscalls: syscallsMap,
+		})
+	}
+
+	if len(outputData) == 0 {
+		fmt.Println("⚠️ Nessun profilo pacchetto elaborato.")
+		return
+	}
+
+	jsonData, err := json.MarshalIndent(outputData, "", "  ")
+	if err != nil {
+		log.Fatalf("Errore durante la generazione del JSON Packages: %v", err)
+	}
+
+	reportDir := "packagesProfiling" // Una nuova cartella per tenere le cose ordinate
+	if err := os.MkdirAll(reportDir, 0755); err != nil {
+		log.Fatalf("Errore durante la creazione della cartella '%s': %v", reportDir, err)
+	}
+
+	fileName := fmt.Sprintf("global_packages_policy_root%d.json", targetPID)
+	fullPath := filepath.Join(reportDir, fileName)
+
+	err = os.WriteFile(fullPath, jsonData, 0644)
+	if err != nil {
+		log.Fatalf("Errore salvataggio file %s: %v", fileName, err)
+	}
+
+	fmt.Printf("\n🛡️ Salvata Policy di Pacchetto (GoLeash-Style) in: %s\n", fullPath)
 }
