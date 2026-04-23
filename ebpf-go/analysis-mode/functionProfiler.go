@@ -110,19 +110,19 @@ func classifyFrame(raw string) (FuncInfo, bool) {
 
 // BuildFunctionProfile takes as input all stacks traced by eBPF (divided by PID)
 // and returns a single global aggregate map: Function -> Syscalls
-func BuildFunctionProfile(tracker map[uint32]map[string]map[string][]string) map[FuncInfo]map[string]bool {
+func BuildFunctionProfile(tracker map[uint32]map[string]map[string][]string) map[FuncInfo]map[string]map[string]bool {
 
 	// Function -> Syscalls map
-	functionProfile := make(map[FuncInfo]map[string]bool)
+	functionProfile := make(map[FuncInfo]map[string]map[string]bool)
 
 	// Iterate over all intercepted PIDs (Parent + any Children)
 	for _ /*pid*/, pidTracker := range tracker {
 
 		// Iterate over the syscalls of that specific process
-		for syscallName, fingerprints := range pidTracker {
+		for syscallName, hashStackTrace := range pidTracker {
 
 			// Iterate over the stack traces
-			for _, stackFrames := range fingerprints {
+			for stackHash, stackFrames := range hashStackTrace {
 
 				// Iterate over each frame to find the responsibile for the syscall
 				for _, frame := range stackFrames {
@@ -130,11 +130,14 @@ func BuildFunctionProfile(tracker map[uint32]map[string]map[string][]string) map
 					if info, isUserLand := classifyFrame(frame); isUserLand {
 
 						if functionProfile[info] == nil {
-							functionProfile[info] = make(map[string]bool)
+							functionProfile[info] = make(map[string]map[string]bool)
+						}
+						if functionProfile[info][syscallName] == nil {
+							functionProfile[info][syscallName] = make(map[string]bool)
 						}
 
-						// Assigning to the info function the syscallName
-						functionProfile[info][syscallName] = true
+						// Assigning to the info function the syscallName with his stackHash
+						functionProfile[info][syscallName][stackHash] = true
 
 						break
 					}

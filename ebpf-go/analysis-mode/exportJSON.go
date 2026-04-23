@@ -9,16 +9,16 @@ import (
 	"time"
 )
 
-// FunctionProfileOutput definisce la struttura del JSON finale per il profiling globale
+// FunctionProfileOutput definisce la struttura del JSON finale in stile GoLeash
 type FunctionProfileOutput struct {
-	Type     string   `json:"type"`     // Es: "NPM", "NODE_INTERNAL", "JS_LOCAL"
-	Function string   `json:"function"` // Il nome della funzione
-	Path     string   `json:"path"`     // Percorso del file
-	Syscalls []string `json:"syscalls"` // La lista aggregata delle syscall invocate
+	Type     string `json:"type"`     // Es: "NPM", "NATIVE_ADDON", "JS_LOCAL"
+	Function string `json:"function"` // Il nome della funzione
+	Path     string `json:"path"`     // Percorso del file
+	// Syscalls non è più un array piatto, ma una mappa 3D: Syscall -> HashPath -> Esiste
+	Syscalls map[string]map[string]bool `json:"syscalls"`
 }
 
-// exportJSONSyscalls genera UN FILE SEPARATO per ogni processo (PID) intercettato.
-// In questo modo manteniamo la tracciabilità esatta (es. Node vs Bash vs Curl).
+// exportJSONSyscalls rimane invariata (genera i file RAW separati per processo)
 func exportJSONSyscalls(tracker map[uint32]map[string]map[string][]string) {
 	if len(tracker) == 0 {
 		fmt.Println("\n⚠️ Nessun dato intercettato, file JSON RAW non creati.")
@@ -34,7 +34,6 @@ func exportJSONSyscalls(tracker map[uint32]map[string]map[string][]string) {
 
 	// Iteriamo sui processi (PID) registrati dal Kernel
 	for pid, pidTracker := range tracker {
-		// Struttura finale per il singolo PID: map[SyscallName]ArrayDiStack
 		finalExportData := make(map[string][][]string)
 
 		for syscall, uniqueStacks := range pidTracker {
@@ -48,7 +47,6 @@ func exportJSONSyscalls(tracker map[uint32]map[string]map[string][]string) {
 			}
 		}
 
-		// Se questo processo ha fatto chiamate valide, generiamo il suo file
 		if len(finalExportData) > 0 {
 			filename := fmt.Sprintf("stacks_report_pid%d_%s.json", pid, timestamp)
 			fullPath := filepath.Join(reportDir, filename)
@@ -70,22 +68,18 @@ func exportJSONSyscalls(tracker map[uint32]map[string]map[string][]string) {
 }
 
 // exportJSONFunctions trasforma il profilo comportamentale in un JSON leggibile e aggregato
-func exportJSONFunctions(targetPID int, profile map[FuncInfo]map[string]bool) {
+// AGGIORNATO: Ora riceve in input la mappa a 3 dimensioni
+func exportJSONFunctions(targetPID int, profile map[FuncInfo]map[string]map[string]bool) {
 	var outputData []FunctionProfileOutput
 
 	for funcInfo, syscallsMap := range profile {
-		var syscallList []string
-
-		// Trasforma il set (mappa booleana) in un array di stringhe
-		for sysName := range syscallsMap {
-			syscallList = append(syscallList, sysName)
-		}
-
+		// Ottimizzazione: Assegniamo direttamente la syscallsMap alla struct!
+		// Non c'è più bisogno di scorrere e creare array di stringhe.
 		outputData = append(outputData, FunctionProfileOutput{
 			Type:     funcInfo.Type,
 			Function: funcInfo.Name,
 			Path:     funcInfo.Path,
-			Syscalls: syscallList,
+			Syscalls: syscallsMap,
 		})
 	}
 
@@ -104,7 +98,6 @@ func exportJSONFunctions(targetPID int, profile map[FuncInfo]map[string]bool) {
 		log.Fatalf("Errore durante la creazione della cartella '%s': %v", reportDir, err)
 	}
 
-	// Creiamo un nome file che indichi la natura globale (Root PID)
 	fileName := fmt.Sprintf("global_functions_profile_root%d.json", targetPID)
 	fullPath := filepath.Join(reportDir, fileName)
 
@@ -113,5 +106,5 @@ func exportJSONFunctions(targetPID int, profile map[FuncInfo]map[string]bool) {
 		log.Fatalf("Errore salvataggio file %s: %v", fileName, err)
 	}
 
-	fmt.Printf("\n📁 Salvato Profilo Comportamentale Globale in: %s\n", fullPath)
+	fmt.Printf("\n📁 Salvato Profilo Comportamentale Globale (GoLeash-Ready) in: %s\n", fullPath)
 }

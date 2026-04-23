@@ -4,7 +4,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -26,7 +28,7 @@ import (
 // INFO STRUCTURE
 type SyscallInfo struct {
 	TimestampNs uint64
-	Pid         uint32 // Identificatore del processo
+	Pid         uint32
 	SyscallId   uint32
 	StackId     int32
 }
@@ -39,6 +41,13 @@ func getSyscallName(id uint32) string {
 		return fmt.Sprintf("syscall_%d", id)
 	}
 	return name
+}
+
+// Helper function to generate hash for stack trace
+func hashStackTrace(callPath []string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte(strings.Join(callPath, "|")))
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func main() {
@@ -92,7 +101,7 @@ func main() {
 	fmt.Printf("🔍 Process Tree Monitoring started. Main PID: %d\n", targetPID)
 
 	// HIERARCHICAL DATA STRUCTURE (Multi-PID)
-	// Structure: map[PID]map[SyscallName]map[StackFingerprint][]StackFrames
+	// Structure: map[PID]map[SyscallName]map[StackHash][]StackFrames
 	syscallStacksTracker := make(map[uint32]map[string]map[string][]string)
 
 	// Blazesym initialization
@@ -185,10 +194,10 @@ func main() {
 			}
 
 			// Saving stack fingerprint
-			stackFingerprint := strings.Join(resolvedNames, "|")
+			stackTraceHash := hashStackTrace(resolvedNames)
 
-			if _, exists := syscallStacksTracker[info.Pid][syscallName][stackFingerprint]; !exists {
-				syscallStacksTracker[info.Pid][syscallName][stackFingerprint] = resolvedNames
+			if _, exists := syscallStacksTracker[info.Pid][syscallName][stackTraceHash]; !exists {
+				syscallStacksTracker[info.Pid][syscallName][stackTraceHash] = resolvedNames
 			}
 		}
 	}
