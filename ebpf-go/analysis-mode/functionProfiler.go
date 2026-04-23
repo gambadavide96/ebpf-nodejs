@@ -109,7 +109,7 @@ func classifyFrame(raw string) (FuncInfo, bool) {
 }
 
 // BuildFunctionProfile takes as input all stacks traced by eBPF (divided by PID)
-// and returns a single global aggregate map: Function -> Syscalls
+// and returns a single global aggregate map: Function -> SyscallName -> StackHash -> bool
 func BuildFunctionProfile(tracker map[uint32]map[string]map[string][]string) map[FuncInfo]map[string]map[string]bool {
 
 	// Function -> Syscalls map

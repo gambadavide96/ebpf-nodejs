@@ -4,39 +4,43 @@ import (
 	"strings"
 )
 
-// PackageProfile rappresenta la policy aggregata a livello di pacchetto (Stile GoLeash)
-// Struttura: map[NomePacchetto]map[Syscall]map[CallPathHash]bool
+// Represents the aggregated package-level policy
+// Structure: map[namePackage]map[SyscallName]map[StackHash]bool
 type PackageProfile map[string]map[string]map[string]bool
 
-// extractPackageName è la funzione euristica che estrae il nome del pacchetto NPM
-// o assegna una categoria semantica in base al percorso del file.
+//	Extracts the NPM package name or assigns a
+//
+// semantic category based on the file path.
 func extractPackageName(info FuncInfo) string {
-	// 1. Moduli Nativi C/C++
+
+	// 1. Native Modules
 	if info.Type == TypeNativeCPP {
 		return "NATIVE_ADDON"
 	}
 
-	// 2. Moduli WASM
+	// 2. Wasm Module
 	if info.Type == TypeWASM {
 		return "WASM_MODULE"
 	}
 
-	// 3. Moduli Esterni (NPM / node_modules)
+	// 3. External modules (NPM / node_modules)
 	if info.Type == TypeNPM {
-		// Esempio di info.Path: "/percorso/app/node_modules/express/lib/router/index.js:42:15"
-		// Vogliamo estrarre solo "express"
+		// Example: "/node_modules/express/lib/router/index.js:42:15"
+		// We want extract only router
+
 		parts := strings.Split(info.Path, "node_modules/")
 		if len(parts) > 1 {
-			// Prendi tutto ciò che c'è dopo "node_modules/"
+			// Take everything after "node_modules/"
 			subPath := parts[1]
-			// Dividi per la barra (/) per isolare il nome della cartella del pacchetto
+			// Divide by slash (/) to isolate the package folder name
+			// The first slice is package name
 			pkgParts := strings.SplitN(subPath, "/", 2)
 			if len(pkgParts) > 0 {
 				pkgName := pkgParts[0]
 
-				// Gestione degli scoped packages di NPM (es. "@types/node")
+				// Managing NPM scoped packages (es. "@nestjs/core")
 				if strings.HasPrefix(pkgName, "@") && len(pkgParts) > 1 {
-					// Ricostruisce lo scope: "@types" + "/" + "node"
+					// Rebuilds the scope: "@nestjs" + "/" + "core"
 					scopedParts := strings.SplitN(pkgParts[1], "/", 2)
 					if len(scopedParts) > 0 {
 						return pkgName + "/" + scopedParts[0]
@@ -45,44 +49,43 @@ func extractPackageName(info FuncInfo) string {
 				return pkgName
 			}
 		}
-		return "UNKNOWN_NPM_MODULE" // Fallback di sicurezza
+		return "UNKNOWN_NPM_MODULE"
 	}
 
-	// 4. Codice Applicativo Locale (JS scritto dallo sviluppatore)
-	// Se il path non contiene node_modules, assumiamo sia codice sorgente diretto
+	// 4. Local JS Code
 	if info.Type == TypeJSLocal {
-		return "APP_LOCAL"
+		return "LOCAL"
 	}
 
 	return "UNKNOWN_PACKAGE"
 }
 
-// BuildPackageProfile aggrega il profilo delle funzioni in un profilo di pacchetto,
-// mantenendo però l'hash dei Call Path per garantire la protezione "Confused Deputy".
+// Aggregates the function profile into a package profile,
+// preserving the call path hash.
 func BuildPackageProfile(funcProfile map[FuncInfo]map[string]map[string]bool) PackageProfile {
 
 	pkgProfile := make(PackageProfile)
 
-	// Itera sull'output estremamente granulare di BuildFunctionProfile
+	// Iterate on function information
 	for funcInfo, syscallsMap := range funcProfile {
 
 		// 1. Determina il Pacchetto di appartenenza della funzione
 		packageName := extractPackageName(funcInfo)
 
-		// Inizializza la mappa per il pacchetto se è la prima volta che lo incontriamo
+		// Initialize the map for the package if this is the first time we encounter it
 		if pkgProfile[packageName] == nil {
 			pkgProfile[packageName] = make(map[string]map[string]bool)
 		}
 
-		// 2. Fai il "merge" (unione) delle syscall e dei relativi hash
+		// 2. Merging syscall and relative hashes
 		for syscallName, hashesMap := range syscallsMap {
 
-			// Inizializza la mappa per la syscall se necessario
+			// Initialize map for syscall if is needed
 			if pkgProfile[packageName][syscallName] == nil {
 				pkgProfile[packageName][syscallName] = make(map[string]bool)
 			}
 
-			// Aggiungi tutti gli hash dei Call Path validi per questa combinazione
+			// Add all stack hashes for this combination
 			for hash := range hashesMap {
 				pkgProfile[packageName][syscallName][hash] = true
 			}
