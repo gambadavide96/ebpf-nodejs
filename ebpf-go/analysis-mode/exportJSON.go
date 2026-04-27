@@ -9,25 +9,25 @@ import (
 	"time"
 )
 
-// FunctionProfileOutput definisce la struttura del JSON finale a livello di funzione
+// Defines the structure of the final JSON at the function level
 type FunctionProfileOutput struct {
-	Type     string `json:"type"`     // Es: "NPM", "NATIVE_ADDON", "JS_LOCAL"
-	Function string `json:"function"` // Il nome della funzione
-	Path     string `json:"path"`     // Percorso del file
-	// Syscalls non è più un array piatto, ma una mappa 3D: Syscall -> HashPath -> Esiste
+	Type     string `json:"type"` // Es: "NPM", "NATIVE_ADDON", "JS_LOCAL"
+	Function string `json:"function"`
+	Path     string `json:"path"`
+	// Syscall -> HashPath -> Exists
 	Syscalls map[string]map[string]bool `json:"syscalls"`
 }
 
-// PackageProfileOutput definisce la struttura del JSON finale per la policy di pacchetto
+// Defines the structure of the final JSON for the package policy
 type PackageProfileOutput struct {
 	Package  string                     `json:"package"`  // Es: "express", "APP_LOCAL"
 	Syscalls map[string]map[string]bool `json:"syscalls"` // Syscall -> HashPath -> true
 }
 
-// exportJSONSyscalls rimane invariata (genera i file RAW separati per processo)
+// Gnerate the report Syscall -> Stack Trace
 func exportJSONSyscalls(tracker map[uint32]map[string]map[string][]string) {
 	if len(tracker) == 0 {
-		fmt.Println("\n⚠️ Nessun dato intercettato, file JSON RAW non creati.")
+		fmt.Println("\n⚠️ No data intercepted")
 		return
 	}
 
@@ -35,10 +35,10 @@ func exportJSONSyscalls(tracker map[uint32]map[string]map[string][]string) {
 	reportDir := "report"
 
 	if err := os.MkdirAll(reportDir, 0755); err != nil {
-		log.Fatalf("Errore durante la creazione della cartella '%s': %v", reportDir, err)
+		log.Fatalf("Error creating folder '%s': %v", reportDir, err)
 	}
 
-	// Iteriamo sui processi (PID) registrati dal Kernel
+	// Iterate over the processes (PID) registered by the Kernel
 	for pid, pidTracker := range tracker {
 		finalExportData := make(map[string][][]string)
 
@@ -59,28 +59,25 @@ func exportJSONSyscalls(tracker map[uint32]map[string]map[string][]string) {
 
 			fileData, err := json.MarshalIndent(finalExportData, "", "  ")
 			if err != nil {
-				log.Printf("⚠️ Errore durante la codifica JSON per il PID %d: %v", pid, err)
+				log.Printf("⚠️ Error while encoding JSON for PID %d: %v", pid, err)
 				continue
 			}
 
 			if err := os.WriteFile(fullPath, fileData, 0644); err != nil {
-				log.Printf("⚠️ Errore durante la scrittura del file JSON per il PID %d: %v", pid, err)
+				log.Printf("⚠️ Error writing JSON file for PID %d: %v", pid, err)
 				continue
 			}
 
-			fmt.Printf("✅ Report Stacks RAW esportato per PID %d in: %s\n", pid, fullPath)
+			fmt.Printf("✅ Exported Stacks Report for PID %d in: %s\n", pid, fullPath)
 		}
 	}
 }
 
-// exportJSONFunctions trasforma il profilo comportamentale in un JSON leggibile e aggregato
-// AGGIORNATO: Ora riceve in input la mappa a 3 dimensioni
+// Return a report: Function -> Syscall -> HashPath
 func exportJSONFunctions(targetPID int, profile map[FuncInfo]map[string]map[string]bool) {
 	var outputData []FunctionProfileOutput
 
 	for funcInfo, syscallsMap := range profile {
-		// Ottimizzazione: Assegniamo direttamente la syscallsMap alla struct!
-		// Non c'è più bisogno di scorrere e creare array di stringhe.
 		outputData = append(outputData, FunctionProfileOutput{
 			Type:     funcInfo.Type,
 			Function: funcInfo.Name,
@@ -90,18 +87,18 @@ func exportJSONFunctions(targetPID int, profile map[FuncInfo]map[string]map[stri
 	}
 
 	if len(outputData) == 0 {
-		fmt.Println("⚠️ Nessun profilo funzione elaborato.")
+		fmt.Println("⚠️ No function profile processed.")
 		return
 	}
 
 	jsonData, err := json.MarshalIndent(outputData, "", "  ")
 	if err != nil {
-		log.Fatalf("Errore durante la generazione del JSON Functions: %v", err)
+		log.Fatalf("Error generating JSON file: %v", err)
 	}
 
 	reportDir := "functionsProfiling"
 	if err := os.MkdirAll(reportDir, 0755); err != nil {
-		log.Fatalf("Errore durante la creazione della cartella '%s': %v", reportDir, err)
+		log.Fatalf("Error creating folder '%s': %v", reportDir, err)
 	}
 
 	fileName := fmt.Sprintf("global_functions_profile_root%d.json", targetPID)
@@ -109,12 +106,13 @@ func exportJSONFunctions(targetPID int, profile map[FuncInfo]map[string]map[stri
 
 	err = os.WriteFile(fullPath, jsonData, 0644)
 	if err != nil {
-		log.Fatalf("Errore salvataggio file %s: %v", fileName, err)
+		log.Fatalf("File saving error %s: %v", fileName, err)
 	}
 
-	fmt.Printf("\n📁 Salvato Profilo Comportamentale Globale (GoLeash-Ready) in: %s\n", fullPath)
+	fmt.Printf("\n📁 Saved Functions Behavioral Profile in: %s\n", fullPath)
 }
 
+// Return a report: Package -> Syscall -> HashPath
 func exportJSONPackages(targetPID int, profile PackageProfile) {
 	var outputData []PackageProfileOutput
 
@@ -126,18 +124,18 @@ func exportJSONPackages(targetPID int, profile PackageProfile) {
 	}
 
 	if len(outputData) == 0 {
-		fmt.Println("⚠️ Nessun profilo pacchetto elaborato.")
+		fmt.Println("⚠️ No package profile processed.")
 		return
 	}
 
 	jsonData, err := json.MarshalIndent(outputData, "", "  ")
 	if err != nil {
-		log.Fatalf("Errore durante la generazione del JSON Packages: %v", err)
+		log.Fatalf("Error generating JSON Packages: %v", err)
 	}
 
-	reportDir := "packagesProfiling" // Una nuova cartella per tenere le cose ordinate
+	reportDir := "packagesProfiling"
 	if err := os.MkdirAll(reportDir, 0755); err != nil {
-		log.Fatalf("Errore durante la creazione della cartella '%s': %v", reportDir, err)
+		log.Fatalf("Error creating folder '%s': %v", reportDir, err)
 	}
 
 	fileName := fmt.Sprintf("global_packages_policy_root%d.json", targetPID)
@@ -145,8 +143,8 @@ func exportJSONPackages(targetPID int, profile PackageProfile) {
 
 	err = os.WriteFile(fullPath, jsonData, 0644)
 	if err != nil {
-		log.Fatalf("Errore salvataggio file %s: %v", fileName, err)
+		log.Fatalf("Error File Saving %s: %v", fileName, err)
 	}
 
-	fmt.Printf("\n🛡️ Salvata Policy di Pacchetto (GoLeash-Style) in: %s\n", fullPath)
+	fmt.Printf("\n Saved Package Policy in: %s\n", fullPath)
 }
