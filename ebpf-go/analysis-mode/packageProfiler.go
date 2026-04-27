@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -54,7 +56,34 @@ func extractPackageName(info FuncInfo) string {
 
 	// 4. Local JS Code
 	if info.Type == TypeJSLocal {
-		return "LOCAL"
+
+		//Es: "file:///home/.../utils/module.js:2:18"
+
+		// Removing URI protocol (ES modules)
+		cleanPath := strings.TrimPrefix(info.Path, "file://")
+
+		// Es:"/app/src/utils/logger.js:42:15"
+
+		// Removing numbers of row and columns
+		pathParts := strings.Split(cleanPath, ":")
+		cleanPath = pathParts[0]
+
+		if cleanPath == "unknown" || cleanPath == "" {
+			return "LOCAL_UNKNOWN"
+		}
+
+		// Extracting file name and folder name
+		fileName := filepath.Base(cleanPath)                // es: "logger.js"
+		parentDir := filepath.Base(filepath.Dir(cleanPath)) // es: "utils"
+
+		// If the file is in the project root (e.g. app.js), filepath.Dir returns "."
+		//es: LOCAL/app.js
+		if parentDir == "." || parentDir == "/" {
+			return fmt.Sprintf("LOCAL/%s", fileName)
+		}
+
+		//es: "LOCAL/utils/logger.js"
+		return fmt.Sprintf("LOCAL/%s/%s", parentDir, fileName)
 	}
 
 	return "UNKNOWN_PACKAGE"
@@ -69,7 +98,7 @@ func BuildPackageProfile(funcProfile map[FuncInfo]map[string]map[string]bool) Pa
 	// Iterate on function information
 	for funcInfo, syscallsMap := range funcProfile {
 
-		// 1. Determina il Pacchetto di appartenenza della funzione
+		// Determine the Package the function belongs to
 		packageName := extractPackageName(funcInfo)
 
 		// Initialize the map for the package if this is the first time we encounter it
@@ -77,7 +106,7 @@ func BuildPackageProfile(funcProfile map[FuncInfo]map[string]map[string]bool) Pa
 			pkgProfile[packageName] = make(map[string]map[string]bool)
 		}
 
-		// 2. Merging syscall and relative hashes
+		// Merging syscall and relative hashes
 		for syscallName, hashesMap := range syscallsMap {
 
 			// Initialize map for syscall if is needed

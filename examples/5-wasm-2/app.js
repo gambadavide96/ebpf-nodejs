@@ -18,7 +18,7 @@ const importObject = {
 const wasmBuffer = fs.readFileSync('./logger.wasm');
 
 WebAssembly.instantiate(wasmBuffer, importObject).then(wasmModule => {
-    console.log("🚀 Modulo Wasm caricato. Avvio ciclo...");
+    console.log(" Modulo Wasm caricato. Avvio ciclo...");
     
     setInterval(() => {
         // 3. JS chiama Wasm

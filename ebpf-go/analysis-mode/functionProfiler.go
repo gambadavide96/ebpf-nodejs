@@ -25,6 +25,15 @@ var noisePrefixes = []string{
 	"__", "_start", "uv_", "node::", "v8::", "Builtins_",
 	"void node", "pthread", "_IO_", "0x", "int node", "std::",
 	"cxxabiv1::",
+	// Libc
+	"malloc", "calloc", "realloc", "free",
+	"fflush", "fopen", "fclose", "fread", "fwrite",
+	"printf", "puts", "fprintf", "sprintf", "lseek",
+	"tzset",
+	//http engine
+	"llhttp_",
+	//ICU
+	"uprv_",
 }
 
 // Declarative lists of keywords for noise filtering (Node internals)

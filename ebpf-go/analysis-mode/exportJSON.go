@@ -146,5 +146,5 @@ func exportJSONPackages(targetPID int, profile PackageProfile) {
 		log.Fatalf("Error File Saving %s: %v", fileName, err)
 	}
 
-	fmt.Printf("\n Saved Package Policy in: %s\n", fullPath)
+	fmt.Printf("\n📁Saved Package Policy in: %s\n", fullPath)
 }
