@@ -30,7 +30,7 @@ type SyscallInfo struct {
 	Pid            uint32
 	SyscallId      uint32
 	StackId        int32
-	FdOwnerStackId int32 // -1 if no fd_owner context is available
+	FdAsyncStackId int32 // -1 if no fd_owner context is available
 }
 
 func getSyscallName(id uint32) string {
@@ -310,9 +310,9 @@ func main() {
 		// When the current stack is pure libuv (async I/O completion),
 		// trace.c supplies the stack that was active when the fd was created.
 		var fdOwnerFrames []ResolvedFrame
-		if info.FdOwnerStackId >= 0 {
+		if info.FdAsyncStackId >= 0 {
 			var fdOwnerRaw [127]uint64
-			fdID := uint32(info.FdOwnerStackId)
+			fdID := uint32(info.FdAsyncStackId)
 			if err := objs.StackMap.Lookup(&fdID, &fdOwnerRaw); err == nil {
 				var ownerIPs []uint64
 				for _, ip := range fdOwnerRaw {
