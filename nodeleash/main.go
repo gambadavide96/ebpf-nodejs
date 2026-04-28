@@ -1,0 +1,426 @@
+package main
+
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpf trace trace.c
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	seccomp "github.com/seccomp/libseccomp-golang"
+
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
+	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
+)
+
+// SyscallInfo mirrors ebpf_syscall_info in trace.c.
+// 24 bytes, naturally aligned — must match exactly (binary.Read is used).
+type SyscallInfo struct {
+	TimestampNs    uint64
+	Pid            uint32
+	SyscallId      uint32
+	StackId        int32
+	FdOwnerStackId int32 // -1 if no fd_owner context is available
+}
+
+func getSyscallName(id uint32) string {
+	name, err := seccomp.ScmpSyscall(id).GetName()
+	if err != nil {
+		return fmt.Sprintf("syscall_%d", id)
+	}
+	return name
+}
+
+// =========================================================================
+// CLI
+//
+// Analyze mode — build a policy from a live Node.js process:
+//   sudo ./nodeleash analyze <PID> [--debug]
+//
+// Enforce mode — monitor against an existing policy and log violations:
+//   sudo ./nodeleash enforce <PID> \
+//       --policy       <path/to/nodeleash_policy_pid<N>_<ts>.json> \
+//       --unattributed <path/to/nodeleash_unattributed_pid<N>_<ts>.json>
+//
+// Both modes share the same eBPF infrastructure (trace.c, Blazesym,
+// ring buffer). The only difference is what happens per event:
+//   analyze: record into Policy / UnattributedPolicy
+//   enforce: check against EnforcementEngine, log violations to terminal
+// =========================================================================
+
+func printUsage() {
+	fmt.Fprintf(os.Stderr, `NodeLeash — npm package-level syscall policy enforcement
+
+ANALYZE MODE  (build policy from a running Node.js process):
+  sudo ./nodeleash analyze <PID> [--debug]
+
+  --debug   print resolved stacks and save full call paths to JSON
+
+ENFORCE MODE  (log policy violations from a running Node.js process):
+  sudo ./nodeleash enforce <PID> \
+      --policy       <nodeleash_policy_pid<N>_<ts>.json> \
+      --unattributed <nodeleash_unattributed_pid<N>_<ts>.json>
+
+  --policy        path to the attributed policy file (required)
+  --unattributed  path to the unattributed policy file (required)
+
+Violations are logged to stdout. The monitored process is never terminated.
+`)
+}
+
+func main() {
+	if len(os.Args) < 3 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	mode := os.Args[1] // "analyze" or "enforce"
+	pidStr := os.Args[2]
+
+	targetPID, err := strconv.ParseUint(pidStr, 10, 32)
+	if err != nil {
+		log.Fatalf("Invalid PID %q: %v", pidStr, err)
+	}
+
+	// Parse mode-specific flags from the remaining arguments.
+	// We use simple manual parsing to avoid importing flag package overhead.
+	args := os.Args[3:]
+
+	var (
+		// analyze flags
+		debugMode bool
+
+		// enforce flags
+		policyPath       string
+		unattributedPath string
+	)
+
+	switch mode {
+	case "analyze":
+		for _, a := range args {
+			if a == "--debug" {
+				debugMode = true
+			}
+		}
+	case "enforce":
+		for i := 0; i < len(args); i++ {
+			switch args[i] {
+			case "--policy":
+				if i+1 < len(args) {
+					policyPath = args[i+1]
+					i++
+				}
+			case "--unattributed":
+				if i+1 < len(args) {
+					unattributedPath = args[i+1]
+					i++
+				}
+			}
+		}
+		if policyPath == "" || unattributedPath == "" {
+			fmt.Fprintln(os.Stderr, "Error: --policy and --unattributed are required in enforce mode.")
+			printUsage()
+			os.Exit(1)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "Error: unknown mode %q. Use 'analyze' or 'enforce'.\n", mode)
+		printUsage()
+		os.Exit(1)
+	}
+
+	// -------------------------------------------------------------------------
+	// eBPF setup — identical for both modes
+	// -------------------------------------------------------------------------
+	if err := rlimit.RemoveMemlock(); err != nil {
+		log.Fatal(err)
+	}
+
+	objs := traceObjects{}
+	if err := loadTraceObjects(&objs, nil); err != nil {
+		log.Fatalf("Loading eBPF objects: %v", err)
+	}
+	defer objs.Close()
+
+	// Register root PID. trace.c propagates it to child processes via trace_fork.
+	pidKey, pidVal := uint32(targetPID), uint32(1)
+	if err := objs.TargetPidMap.Put(&pidKey, &pidVal); err != nil {
+		log.Fatalf("Inserting PID: %v", err)
+	}
+
+	// Populate kernel-side syscall filter from the capability taxonomy.
+	// Infrastructure syscalls (futex, epoll_wait...) are dropped in the kernel.
+	if err := populateTrackedSyscalls(objs); err != nil {
+		log.Fatalf("Populating syscall filter: %v", err)
+	}
+
+	tpSysEnter, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
+	if err != nil {
+		log.Fatalf("sys_enter: %v", err)
+	}
+	defer tpSysEnter.Close()
+
+	// sys_exit: needed to record fd → stack_id in fd_owner_map.
+	tpSysExit, err := link.Tracepoint("raw_syscalls", "sys_exit", objs.TraceSysExit, nil)
+	if err != nil {
+		log.Fatalf("sys_exit: %v", err)
+	}
+	defer tpSysExit.Close()
+
+	tpFork, err := link.Tracepoint("sched", "sched_process_fork", objs.TraceFork, nil)
+	if err != nil {
+		log.Fatalf("fork: %v", err)
+	}
+	defer tpFork.Close()
+
+	tpExit, err := link.Tracepoint("sched", "sched_process_exit", objs.TraceExit, nil)
+	if err != nil {
+		log.Fatalf("exit: %v", err)
+	}
+	defer tpExit.Close()
+
+	// -------------------------------------------------------------------------
+	// Mode-specific state
+	// -------------------------------------------------------------------------
+	var (
+		// Analyze mode
+		policy             Policy
+		unattributedPolicy *UnattributedPolicy
+		debugStore         callPathDebugStore
+		rawTracker         map[string]map[string][]string
+
+		// Enforce mode
+		engine *EnforcementEngine
+	)
+
+	switch mode {
+	case "analyze":
+		policy = NewPolicy()
+		unattributedPolicy = NewUnattributedPolicy()
+		debugStore = make(callPathDebugStore)
+		rawTracker = make(map[string]map[string][]string)
+		fmt.Printf("🔍 NodeLeash [ANALYZE] — PID: %d\n", targetPID)
+		if debugMode {
+			fmt.Println("   [--debug: stacks printed, call paths saved to JSON]")
+		}
+
+	case "enforce":
+		engine, err = LoadEnforcementEngine(policyPath, unattributedPath)
+		if err != nil {
+			log.Fatalf("Loading enforcement engine: %v", err)
+		}
+		fmt.Printf("🛡️  NodeLeash [ENFORCE] — PID: %d\n", targetPID)
+		fmt.Println("   Violations will be logged to stdout.")
+	}
+
+	symb := NewBlazeSymbolizer()
+
+	// Boot time offset: convert eBPF CLOCK_MONOTONIC timestamps to wall clock.
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		log.Fatalf("ClockGettime: %v", err)
+	}
+	bootTime := time.Now().Add(-time.Duration(uint64(ts.Sec)*1e9 + uint64(ts.Nsec)))
+
+	// -------------------------------------------------------------------------
+	// Ring buffer + graceful shutdown
+	// -------------------------------------------------------------------------
+	rd, err := ringbuf.NewReader(objs.RingBuffer)
+	if err != nil {
+		log.Fatalf("Ring buffer reader: %v", err)
+	}
+	defer rd.Close()
+
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-stopper
+		fmt.Println("\n🛑 Signal received — flushing...")
+		rd.Close()
+	}()
+
+	fmt.Println("Listening for syscall events...")
+
+	// =========================================================================
+	// EVENT LOOP
+	//
+	// Steps 1–6 are identical in both modes: decode the event, resolve symbols,
+	// build the attributed stack. Step 7 branches on mode:
+	//   analyze → record into policy structures
+	//   enforce → check against EnforcementEngine, log violations
+	// =========================================================================
+	for {
+		record, err := rd.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) ||
+				errors.Is(err, os.ErrClosed) ||
+				strings.Contains(err.Error(), "file already closed") {
+				break
+			}
+			log.Printf("Ring buffer error: %v", err)
+			continue
+		}
+
+		// Step 1: decode fixed-size event header from trace.c.
+		var info SyscallInfo
+		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &info); err != nil {
+			log.Printf("Decode error: %v", err)
+			continue
+		}
+
+		// Step 2: retrieve current stack addresses from the eBPF stack map.
+		var rawFrames [127]uint64
+		if err := objs.StackMap.Lookup(&info.StackId, &rawFrames); err != nil {
+			continue
+		}
+		var validIPs []uint64
+		for _, ip := range rawFrames {
+			if ip == 0 {
+				break
+			}
+			validIPs = append(validIPs, ip)
+		}
+		if len(validIPs) == 0 {
+			continue
+		}
+
+		syscallName := getSyscallName(info.SyscallId)
+
+		// Step 3: resolve instruction pointers → ResolvedFrame{Name, Module}.
+		// Name: from Blazesym (V8 perf map for JS, ELF for native addons).
+		// Module: from /proc/<pid>/maps — available even for unresolved symbols.
+		// Requires Node.js started with --perf-basic-prof for JS frame names.
+		resolvedFrames := symb.ResolveBatch(validIPs, info.Pid)
+
+		// Step 4 (analyze only): record raw stack before any filtering.
+		if mode == "analyze" {
+			recordRawStack(rawTracker, syscallName, resolvedFrames)
+		}
+
+		// Step 5: resolve fd_owner frames for async attribution fallback.
+		// When the current stack is pure libuv (async I/O completion),
+		// trace.c supplies the stack that was active when the fd was created.
+		var fdOwnerFrames []ResolvedFrame
+		if info.FdOwnerStackId >= 0 {
+			var fdOwnerRaw [127]uint64
+			fdID := uint32(info.FdOwnerStackId)
+			if err := objs.StackMap.Lookup(&fdID, &fdOwnerRaw); err == nil {
+				var ownerIPs []uint64
+				for _, ip := range fdOwnerRaw {
+					if ip == 0 {
+						break
+					}
+					ownerIPs = append(ownerIPs, ip)
+				}
+				if len(ownerIPs) > 0 {
+					fdOwnerFrames = symb.ResolveBatch(ownerIPs, info.Pid)
+				}
+			}
+		}
+
+		// Step 6: classify frames, build call path, map syscall → capability.
+		// Returns (event, true) for attributed events.
+		// Returns (AnalyzedStack{Capability: cap}, false) for unattributed.
+		event, ok := AnalyzeStack(syscallName, resolvedFrames, fdOwnerFrames)
+
+		// Step 7: branch on mode.
+		switch mode {
+		case "analyze":
+			if ok {
+				policy.Record(event)
+			} else if event.Capability != "" {
+				// Unattributed but capability known: feed the safety net.
+				unattributedPolicy.Record(event.Capability)
+			}
+
+			if debugMode && ok {
+				eventTime := bootTime.Add(time.Duration(info.TimestampNs))
+				marker := ""
+				if event.FromFdOwner {
+					marker = " [fd_owner]"
+				}
+				fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s%s\n",
+					eventTime.Format("15:04:05.000000"),
+					info.Pid, event.Capability, event.Responsible, marker)
+				fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
+				for i, f := range resolvedFrames {
+					fmt.Printf("      [%2d] %s\n", i, f.Display())
+				}
+				debugStore.RecordDebug(event)
+			}
+
+		case "enforce":
+			// Pass the event to the engine regardless of attribution status.
+			// Check() handles both cases: attributed events go through the
+			// per-package policy; unattributed events go through the safety net.
+			engine.Check(event, info.Pid, syscallName)
+		}
+	}
+
+	// =========================================================================
+	// SHUTDOWN & EXPORT
+	// =========================================================================
+
+	checkDropCounters(objs)
+
+	switch mode {
+	case "analyze":
+		policy.PrintSummary()
+		unattributedPolicy.PrintSummary()
+		printRawReport(rawTracker)
+		exportRawReport(int(targetPID), rawTracker)
+
+		if err := policy.Export(int(targetPID), "policy"); err != nil {
+			log.Printf("Policy export error: %v", err)
+		}
+		if err := unattributedPolicy.Export(int(targetPID), "policy"); err != nil {
+			log.Printf("Unattributed policy export error: %v", err)
+		}
+		if debugMode {
+			debugStore.ExportDebug(int(targetPID), "policy")
+		}
+
+	case "enforce":
+		engine.PrintViolationSummary()
+	}
+}
+
+// populateTrackedSyscalls fills the kernel-side tracked_syscalls_map from
+// the capability taxonomy. Only these syscall IDs reach the ring buffer.
+func populateTrackedSyscalls(objs traceObjects) error {
+	val := uint8(1)
+	for name := range syscallToCapability {
+		id, err := seccomp.GetSyscallFromName(name)
+		if err != nil {
+			continue
+		}
+		key := uint32(id)
+		if err := objs.TrackedSyscallsMap.Put(&key, &val); err != nil {
+			return fmt.Errorf("inserting syscall %s (id %d): %w", name, key, err)
+		}
+	}
+	return nil
+}
+
+// checkDropCounters warns if events were silently lost during the session.
+func checkDropCounters(objs traceObjects) {
+	var stackDrops, ringDrops uint64
+	k0, k1 := uint32(0), uint32(1)
+	objs.DropCounters.Lookup(&k0, &stackDrops)
+	objs.DropCounters.Lookup(&k1, &ringDrops)
+	if stackDrops > 0 || ringDrops > 0 {
+		fmt.Printf("\n⚠️  Data loss during session:\n")
+		fmt.Printf("   Stack map full:   %d events dropped\n", stackDrops)
+		fmt.Printf("   Ring buffer full: %d events dropped\n", ringDrops)
+		fmt.Printf("   Consider increasing max_entries in trace.c\n")
+	}
+}
