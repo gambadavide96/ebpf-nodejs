@@ -27,7 +27,7 @@ struct {
 
 // Kernel-side syscall allowlist. Populated at startup from syscallToCapability.
 // Drops futex, epoll_wait, clock_gettime and all other infrastructure syscalls
-// before they reach the ring buffer — zero cost to userspace.
+// before they reach the ring buffer 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, __u32);   // syscall ID

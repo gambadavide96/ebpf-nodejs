@@ -40,6 +40,37 @@ func getSyscallName(id uint32) string {
 	return name
 }
 
+// populateTrackedSyscalls fills the kernel-side tracked_syscalls_map from
+// the capability taxonomy. Only these syscall IDs reach the ring buffer.
+func populateTrackedSyscalls(objs traceObjects) error {
+	val := uint8(1)
+	for name := range syscallToCapability {
+		id, err := seccomp.GetSyscallFromName(name)
+		if err != nil {
+			continue
+		}
+		key := uint32(id)
+		if err := objs.TrackedSyscallsMap.Put(&key, &val); err != nil {
+			return fmt.Errorf("inserting syscall %s (id %d): %w", name, key, err)
+		}
+	}
+	return nil
+}
+
+// checkDropCounters warns if events were silently lost during the session.
+func checkDropCounters(objs traceObjects) {
+	var stackDrops, ringDrops uint64
+	k0, k1 := uint32(0), uint32(1)
+	objs.DropCounters.Lookup(&k0, &stackDrops)
+	objs.DropCounters.Lookup(&k1, &ringDrops)
+	if stackDrops > 0 || ringDrops > 0 {
+		fmt.Printf("\n⚠️  Data loss during session:\n")
+		fmt.Printf("   Stack map full:   %d events dropped\n", stackDrops)
+		fmt.Printf("   Ring buffer full: %d events dropped\n", ringDrops)
+		fmt.Printf("   Consider increasing max_entries in trace.c\n")
+	}
+}
+
 // =========================================================================
 // CLI
 //
@@ -83,7 +114,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mode   := os.Args[1] // "analyze" or "enforce"
+	mode := os.Args[1] // "analyze" or "enforce"
 	pidStr := os.Args[2]
 
 	targetPID, err := strconv.ParseUint(pidStr, 10, 32)
@@ -195,10 +226,10 @@ func main() {
 
 	switch mode {
 	case "analyze":
-		policy             = NewPolicy()
+		policy = NewPolicy()
 		unattributedPolicy = NewUnattributedPolicy()
-		debugStore         = make(callPathDebugStore)
-		rawTracker         = make(map[string]map[string][]string)
+		debugStore = make(callPathDebugStore)
+		rawTracker = make(map[string]map[string][]string)
 		fmt.Printf("🔍 NodeLeash [ANALYZE] — PID: %d\n", targetPID)
 		if debugMode {
 			fmt.Println("   [--debug: stacks printed, call paths saved to JSON]")
@@ -223,7 +254,7 @@ func main() {
 	bootTime := time.Now().Add(-time.Duration(uint64(ts.Sec)*1e9 + uint64(ts.Nsec)))
 
 	// -------------------------------------------------------------------------
-	// Ring buffer + graceful shutdown
+	// Ring buffer + shutdown
 	// -------------------------------------------------------------------------
 	rd, err := ringbuf.NewReader(objs.RingBuffer)
 	if err != nil {
@@ -360,36 +391,5 @@ func main() {
 
 	case "enforce":
 		engine.PrintViolationSummary()
-	}
-}
-
-// populateTrackedSyscalls fills the kernel-side tracked_syscalls_map from
-// the capability taxonomy. Only these syscall IDs reach the ring buffer.
-func populateTrackedSyscalls(objs traceObjects) error {
-	val := uint8(1)
-	for name := range syscallToCapability {
-		id, err := seccomp.GetSyscallFromName(name)
-		if err != nil {
-			continue
-		}
-		key := uint32(id)
-		if err := objs.TrackedSyscallsMap.Put(&key, &val); err != nil {
-			return fmt.Errorf("inserting syscall %s (id %d): %w", name, key, err)
-		}
-	}
-	return nil
-}
-
-// checkDropCounters warns if events were silently lost during the session.
-func checkDropCounters(objs traceObjects) {
-	var stackDrops, ringDrops uint64
-	k0, k1 := uint32(0), uint32(1)
-	objs.DropCounters.Lookup(&k0, &stackDrops)
-	objs.DropCounters.Lookup(&k1, &ringDrops)
-	if stackDrops > 0 || ringDrops > 0 {
-		fmt.Printf("\n⚠️  Data loss during session:\n")
-		fmt.Printf("   Stack map full:   %d events dropped\n", stackDrops)
-		fmt.Printf("   Ring buffer full: %d events dropped\n", ringDrops)
-		fmt.Printf("   Consider increasing max_entries in trace.c\n")
 	}
 }
