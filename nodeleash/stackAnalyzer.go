@@ -160,13 +160,16 @@ func buildCallPath(frames []ResolvedFrame) (responsible string, callPath []strin
 
 	for _, frame := range frames {
 		cf := classifyFrame(frame)
+		//If the frame is noise, we ignore it
 		if cf.Kind == KindInfrastructure || cf.PackageName == "" {
 			continue
 		}
+		//We find the syscall responsible
 		if responsible == "" {
 			responsible = cf.PackageName
 			found = true
 		}
+		//If we haven't seen this package, we add to the call path
 		if !seen[cf.PackageName] {
 			packages = append(packages, cf.PackageName)
 			seen[cf.PackageName] = true
@@ -194,6 +197,7 @@ func buildCallPath(frames []ResolvedFrame) (responsible string, callPath []strin
 // Asynchronous I/O (deferred by libuv or the worker thread pool) produces
 // stacks with no user-land JS frames and ends up in UnattributedPolicy.
 func AnalyzeStack(syscallName string, frames []ResolvedFrame) (AnalyzedStack, bool) {
+	//Assigning capability
 	cap := MapToCapability(syscallName)
 	if cap == CapUnknown {
 		return AnalyzedStack{}, false
@@ -201,6 +205,8 @@ func AnalyzeStack(syscallName string, frames []ResolvedFrame) (AnalyzedStack, bo
 
 	responsible, callPath, found := buildCallPath(frames)
 
+	//If we haven't found the responsible
+	//we pass the capability to assign it in unattributed fallback
 	if !found {
 		return AnalyzedStack{Capability: cap}, false
 	}
