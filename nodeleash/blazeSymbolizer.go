@@ -30,14 +30,8 @@ func (f ResolvedFrame) Display() string {
 	return "[unknown]"
 }
 
-type cacheKey struct {
-	pid  uint32
-	addr uint64
-}
-
 type BlazeSymbolizer struct {
 	sym      *blazesym.Symbolizer
-	cache    map[cacheKey]ResolvedFrame
 	modCache map[uint32]*moduleResolver
 }
 
@@ -48,7 +42,6 @@ func NewBlazeSymbolizer() *BlazeSymbolizer {
 	}
 	return &BlazeSymbolizer{
 		sym:      sym,
-		cache:    make(map[cacheKey]ResolvedFrame),
 		modCache: make(map[uint32]*moduleResolver),
 	}
 }
@@ -65,39 +58,21 @@ func (b *BlazeSymbolizer) getModuleResolver(pid uint32) *moduleResolver {
 	return r
 }
 
-// ResolveBatch resolves instruction pointers to ResolvedFrame values.
-// Cache misses are batched into a single Blazesym call.
+// ResolveBatch resolves all addresses in a single call to Blazesym.
+// No cache — each call always queries Blazesym and /proc/<pid>/maps.
 func (b *BlazeSymbolizer) ResolveBatch(ips []uint64, pid uint32) []ResolvedFrame {
 	results := make([]ResolvedFrame, len(ips))
 	resolver := b.getModuleResolver(pid)
 
-	var missIdx []int
-	var missIPs []uint64
-
-	for i, ip := range ips {
-		if f, ok := b.cache[cacheKey{pid, ip}]; ok {
-			results[i] = f
-		} else {
-			missIdx = append(missIdx, i)
-			missIPs = append(missIPs, ip)
-		}
-	}
-
-	if len(missIPs) == 0 {
-		return results
-	}
-
 	symbols, err := b.sym.SymbolizeProcessAbsAddrs(
-		missIPs, pid,
+		ips, pid,
 		blazesym.ProcessSourceWithPerfMap(true),
 	)
 
-	for j, idx := range missIdx {
-		ip := missIPs[j]
-
+	for i, ip := range ips {
 		name := fmt.Sprintf("0x%x", ip)
-		if err == nil && j < len(symbols) && symbols[j].Name != "" {
-			name = symbols[j].Name
+		if err == nil && i < len(symbols) && symbols[i].Name != "" {
+			name = symbols[i].Name
 		}
 
 		module := ""
@@ -105,9 +80,7 @@ func (b *BlazeSymbolizer) ResolveBatch(ips []uint64, pid uint32) []ResolvedFrame
 			module = resolver.Resolve(ip)
 		}
 
-		f := ResolvedFrame{Name: name, Module: module}
-		results[idx] = f
-		b.cache[cacheKey{pid, ip}] = f
+		results[i] = ResolvedFrame{Name: name, Module: module}
 	}
 
 	return results
