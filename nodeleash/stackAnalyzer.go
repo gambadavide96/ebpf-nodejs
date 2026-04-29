@@ -18,7 +18,6 @@ type AnalyzedStack struct {
 	Responsible  string   // package that triggered the syscall ("" if unattributed)
 	CallPath     []string // [outermost_caller, ..., Responsible]
 	CallPathHash string
-	FromFdOwner  bool // attribution used the async fd_owner fallback
 }
 
 type FrameKind int
@@ -190,25 +189,17 @@ func buildCallPath(frames []ResolvedFrame) (responsible string, callPath []strin
 // Returns (AnalyzedStack{Capability: cap}, false) when attribution fails
 // but the capability is known — callers record it in UnattributedPolicy.
 //
-// Two-stage attribution:
-//   Stage 1 — current stack: works for synchronous calls.
-//   Stage 2 — fd_owner fallback: used when Stage 1 finds only
-//             infrastructure frames (async I/O completion via libuv).
-//             Not needed in GoLeash because Go goroutines block during
-//             syscalls, keeping the originating stack always present.
-func AnalyzeStack(syscallName string, frames []ResolvedFrame, fdOwnerFrames []ResolvedFrame) (AnalyzedStack, bool) {
+// Attribution works for syscalls executed synchronously or quasi-synchronously,
+// i.e. while the JS frame is still physically present on the native stack.
+// Asynchronous I/O (deferred by libuv or the worker thread pool) produces
+// stacks with no user-land JS frames and ends up in UnattributedPolicy.
+func AnalyzeStack(syscallName string, frames []ResolvedFrame) (AnalyzedStack, bool) {
 	cap := MapToCapability(syscallName)
 	if cap == CapUnknown {
 		return AnalyzedStack{}, false
 	}
 
 	responsible, callPath, found := buildCallPath(frames)
-
-	fromFdOwner := false
-	if !found && len(fdOwnerFrames) > 0 {
-		responsible, callPath, found = buildCallPath(fdOwnerFrames)
-		fromFdOwner = found
-	}
 
 	if !found {
 		return AnalyzedStack{Capability: cap}, false
@@ -220,7 +211,6 @@ func AnalyzeStack(syscallName string, frames []ResolvedFrame, fdOwnerFrames []Re
 		Responsible:  responsible,
 		CallPath:     callPath,
 		CallPathHash: hashCallPath(callPath),
-		FromFdOwner:  fromFdOwner,
 	}, true
 }
 

@@ -24,13 +24,12 @@ import (
 )
 
 // SyscallInfo mirrors ebpf_syscall_info in trace.c.
-// 24 bytes, naturally aligned — must match exactly (binary.Read is used).
+// 20 bytes, naturally aligned — must match exactly (binary.Read is used).
 type SyscallInfo struct {
-	TimestampNs    uint64
-	Pid            uint32
-	SyscallId      uint32
-	StackId        int32
-	FdAsyncStackId int32 // -1 if no fd_owner context is available
+	TimestampNs uint64
+	Pid         uint32
+	SyscallId   uint32
+	StackId     int32
 }
 
 func getSyscallName(id uint32) string {
@@ -84,7 +83,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mode := os.Args[1] // "analyze" or "enforce"
+	mode   := os.Args[1] // "analyze" or "enforce"
 	pidStr := os.Args[2]
 
 	targetPID, err := strconv.ParseUint(pidStr, 10, 32)
@@ -93,7 +92,6 @@ func main() {
 	}
 
 	// Parse mode-specific flags from the remaining arguments.
-	// We use simple manual parsing to avoid importing flag package overhead.
 	args := os.Args[3:]
 
 	var (
@@ -169,13 +167,6 @@ func main() {
 	}
 	defer tpSysEnter.Close()
 
-	// sys_exit: needed to record fd → stack_id in fd_owner_map.
-	tpSysExit, err := link.Tracepoint("raw_syscalls", "sys_exit", objs.TraceSysExit, nil)
-	if err != nil {
-		log.Fatalf("sys_exit: %v", err)
-	}
-	defer tpSysExit.Close()
-
 	tpFork, err := link.Tracepoint("sched", "sched_process_fork", objs.TraceFork, nil)
 	if err != nil {
 		log.Fatalf("fork: %v", err)
@@ -204,10 +195,10 @@ func main() {
 
 	switch mode {
 	case "analyze":
-		policy = NewPolicy()
+		policy             = NewPolicy()
 		unattributedPolicy = NewUnattributedPolicy()
-		debugStore = make(callPathDebugStore)
-		rawTracker = make(map[string]map[string][]string)
+		debugStore         = make(callPathDebugStore)
+		rawTracker         = make(map[string]map[string][]string)
 		fmt.Printf("🔍 NodeLeash [ANALYZE] — PID: %d\n", targetPID)
 		if debugMode {
 			fmt.Println("   [--debug: stacks printed, call paths saved to JSON]")
@@ -253,8 +244,8 @@ func main() {
 	// =========================================================================
 	// EVENT LOOP
 	//
-	// Steps 1–6 are identical in both modes: decode the event, resolve symbols,
-	// build the attributed stack. Step 7 branches on mode:
+	// Steps 1–5 are identical in both modes: decode the event, resolve symbols,
+	// build the attributed stack. Step 6 branches on mode:
 	//   analyze → record into policy structures
 	//   enforce → check against EnforcementEngine, log violations
 	// =========================================================================
@@ -306,33 +297,16 @@ func main() {
 			recordRawStack(rawTracker, syscallName, resolvedFrames)
 		}
 
-		// Step 5: resolve fd_owner frames for async attribution fallback.
-		// When the current stack is pure libuv (async I/O completion),
-		// trace.c supplies the stack that was active when the fd was created.
-		var fdOwnerFrames []ResolvedFrame
-		if info.FdAsyncStackId >= 0 {
-			var fdOwnerRaw [127]uint64
-			fdID := uint32(info.FdAsyncStackId)
-			if err := objs.StackMap.Lookup(&fdID, &fdOwnerRaw); err == nil {
-				var ownerIPs []uint64
-				for _, ip := range fdOwnerRaw {
-					if ip == 0 {
-						break
-					}
-					ownerIPs = append(ownerIPs, ip)
-				}
-				if len(ownerIPs) > 0 {
-					fdOwnerFrames = symb.ResolveBatch(ownerIPs, info.Pid)
-				}
-			}
-		}
-
-		// Step 6: classify frames, build call path, map syscall → capability.
+		// Step 5: classify frames, build call path, map syscall → capability.
 		// Returns (event, true) for attributed events.
 		// Returns (AnalyzedStack{Capability: cap}, false) for unattributed.
-		event, ok := AnalyzeStack(syscallName, resolvedFrames, fdOwnerFrames)
+		// Attribution works only when the JS frame is present on the native
+		// stack at the moment of the syscall (synchronous/quasi-synchronous
+		// execution). Deferred async I/O via libuv or the worker thread pool
+		// produces stacks with no user-land frames → UnattributedPolicy.
+		event, ok := AnalyzeStack(syscallName, resolvedFrames)
 
-		// Step 7: branch on mode.
+		// Step 6: branch on mode.
 		switch mode {
 		case "analyze":
 			if ok {
@@ -344,13 +318,9 @@ func main() {
 
 			if debugMode && ok {
 				eventTime := bootTime.Add(time.Duration(info.TimestampNs))
-				marker := ""
-				if event.FromFdOwner {
-					marker = " [fd_owner]"
-				}
-				fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s%s\n",
+				fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s\n",
 					eventTime.Format("15:04:05.000000"),
-					info.Pid, event.Capability, event.Responsible, marker)
+					info.Pid, event.Capability, event.Responsible)
 				fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
 				for i, f := range resolvedFrames {
 					fmt.Printf("      [%2d] %s\n", i, f.Display())
@@ -369,7 +339,6 @@ func main() {
 	// =========================================================================
 	// SHUTDOWN & EXPORT
 	// =========================================================================
-
 	checkDropCounters(objs)
 
 	switch mode {

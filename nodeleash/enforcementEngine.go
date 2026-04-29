@@ -92,13 +92,12 @@ func (e *EnforcementEngine) Check(event AnalyzedStack, pid uint32, syscallName s
 		// Primary check: attributed event.
 		if e.policy.CheckViolation(event) {
 			e.logViolation(Violation{
-				Time:        time.Now(),
-				Pid:         pid,
-				Syscall:     syscallName,
-				Capability:  event.Capability,
-				Package:     event.Responsible,
-				CallPath:    event.CallPath,
-				FromFdOwner: event.FromFdOwner,
+				Time:       time.Now(),
+				Pid:        pid,
+				Syscall:    syscallName,
+				Capability: event.Capability,
+				Package:    event.Responsible,
+				CallPath:   event.CallPath,
 			})
 		}
 		return
