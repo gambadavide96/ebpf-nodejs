@@ -13,7 +13,6 @@ import (
 // When ok=false, only Capability is populated — callers use it for
 // the UnattributedPolicy safety net.
 type AnalyzedStack struct {
-	Syscall      string
 	Capability   string
 	Responsible  string   // package that triggered the syscall ("" if unattributed)
 	CallPath     []string // [outermost_caller, ..., Responsible]
@@ -103,7 +102,7 @@ func classifyJSFrame(raw string) classifiedFrame {
 func extractNativeAddonPackage(modulePath string) string {
 	idx := strings.Index(modulePath, "node_modules/")
 	if idx == -1 {
-		return "NATIVE_ADDON"
+		return filepath.Base(modulePath)
 	}
 	sub := modulePath[idx+len("node_modules/"):]
 	parts := strings.SplitN(sub, "/", 3)
@@ -154,6 +153,8 @@ func anonLabel(path string) string {
 // Call path construction
 // -----------------------------------------------------------------------
 
+// Responsibile: The userspace responsible of the syscall
+// callPath: The userspace path that lead to the syscall
 func buildCallPath(frames []ResolvedFrame) (responsible string, callPath []string, found bool) {
 	var packages []string
 	seen := make(map[string]bool)
@@ -212,7 +213,6 @@ func AnalyzeStack(syscallName string, frames []ResolvedFrame) (AnalyzedStack, bo
 	}
 
 	return AnalyzedStack{
-		Syscall:      syscallName,
 		Capability:   cap,
 		Responsible:  responsible,
 		CallPath:     callPath,
