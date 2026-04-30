@@ -20,6 +20,8 @@ type ResolvedFrame struct {
 	Module string // "/app/node_modules/bcrypt/build/Release/bcrypt.node" | "" (anonymous JIT)
 }
 
+// Produces a readable string for printing the frame,
+// managing the three possible resolution states
 func (f ResolvedFrame) Display() string {
 	if f.Name != "" {
 		return f.Name
@@ -32,7 +34,7 @@ func (f ResolvedFrame) Display() string {
 
 type BlazeSymbolizer struct {
 	sym      *blazesym.Symbolizer
-	modCache map[uint32]*moduleResolver
+	modCache map[uint32]*moduleResolver //Cache for module resolution: modCache[pid].Resolve(ip)
 }
 
 func NewBlazeSymbolizer() *BlazeSymbolizer {
@@ -46,6 +48,7 @@ func NewBlazeSymbolizer() *BlazeSymbolizer {
 	}
 }
 
+// Return or create a module resolver per pid
 func (b *BlazeSymbolizer) getModuleResolver(pid uint32) *moduleResolver {
 	if r, ok := b.modCache[pid]; ok {
 		return r
@@ -74,7 +77,8 @@ func (b *BlazeSymbolizer) ResolveBatch(ips []uint64, pid uint32) []ResolvedFrame
 		if err == nil && i < len(symbols) && symbols[i].Name != "" {
 			name = symbols[i].Name
 		}
-
+		//TO DO: Possibile semplificazione usare symbols.module
+		//al posto che moduleResolver? Da testare
 		module := ""
 		if resolver != nil {
 			module = resolver.Resolve(ip)

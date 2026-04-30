@@ -10,38 +10,38 @@ import (
 )
 
 type mapEntry struct {
-	start  uint64
-	end    uint64
-	module string
+	start  uint64 //Start address
+	end    uint64 //End address
+	module string //Path module
 }
 
 // moduleResolver maps virtual addresses to the binary file they belong to
 // by reading /proc/<pid>/maps.
-//
-// This is the foundation of NodeLeash's positive-whitelist frame classification.
-// Instead of a fragile blacklist of symbol name prefixes, we ask:
-// "which binary does this address come from?"
+// Basically we are asking: "which binary does this address come from?"
 //
 // Classification rules (applied in stackAnalyzer.go):
-//   module ends with ".node"  → npm native addon  (positive match)
-//   module is any other path  → Node.js infrastructure (node, libc, libuv)
-//   module is empty           → anonymous mmap (V8 JIT region)
-//                               identified via "JS:" name prefix instead
+//	module ends with ".node"  → npm native addon  (positive match)
+//	module is any other path  → Node.js infrastructure (node, libc, libuv)
+//	module is empty           → anonymous mmap (V8 JIT region)
+//	                            identified via "JS:" name prefix instead
+
 type moduleResolver struct {
-	mu      sync.RWMutex
+	mu      sync.RWMutex //A read/write mutex. Protects entries from race conditions.
 	pid     uint32
-	entries []mapEntry
+	entries []mapEntry //The list of memory ranges parsed from /proc/<pid>/maps
 }
 
 func newModuleResolver(pid uint32) (*moduleResolver, error) {
+	//Create module resolver struct
 	r := &moduleResolver{pid: pid}
+	//Populating entries from /proc/<pid>/maps
 	if err := r.reload(); err != nil {
 		return nil, err
 	}
 	return r, nil
 }
 
-// Resolve returns the binary path for a given virtual address.
+// Returns the binary path for a given virtual address.
 // On miss, triggers a reload to handle addons loaded after startup.
 func (r *moduleResolver) Resolve(addr uint64) string {
 	r.mu.RLock()
@@ -57,6 +57,7 @@ func (r *moduleResolver) Resolve(addr uint64) string {
 	return result
 }
 
+// Look if the current virtual addres belongs to an entry
 func (r *moduleResolver) lookup(addr uint64) string {
 	for _, e := range r.entries {
 		if addr >= e.start && addr < e.end {
@@ -66,6 +67,7 @@ func (r *moduleResolver) lookup(addr uint64) string {
 	return ""
 }
 
+// Populate entries from /proc/<pid>/maps
 func (r *moduleResolver) reload() error {
 	f, err := os.Open(fmt.Sprintf("/proc/%d/maps", r.pid))
 	if err != nil {
