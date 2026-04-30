@@ -318,7 +318,7 @@ func main() {
 		syscallName := getSyscallName(info.SyscallId)
 
 		// Step 3: resolve instruction pointers → ResolvedFrame{Name, Module}.
-		// Name: from Blazesym (V8 perf map for JS, ELF for native addons).
+		// Name: from Blazesym (V8 perf map for JS, ELF for Node binary).
 		// Module: from /proc/<pid>/maps — available even for unresolved symbols.
 		// Requires Node.js started with --perf-basic-prof for JS frame names.
 		resolvedFrames := symb.ResolveBatch(validIPs, info.Pid)
@@ -347,16 +347,27 @@ func main() {
 				unattributedPolicy.Record(event.Capability)
 			}
 
-			if debugMode && ok {
+			if debugMode {
 				eventTime := bootTime.Add(time.Duration(info.TimestampNs))
-				fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s\n",
-					eventTime.Format("15:04:05.000000"),
-					info.Pid, event.Capability, event.Responsible)
-				fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
+
+				if ok {
+					// Attributed event
+					fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s\n",
+						eventTime.Format("15:04:05.000000"),
+						info.Pid, event.Capability, event.Responsible)
+					fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
+					debugStore.RecordDebug(event)
+				} else if event.Capability != "" {
+					// Unattributed event but with known capability
+					fmt.Printf("\n🕒 [%s] [PID:%d] %s → [unattributed]\n",
+						eventTime.Format("15:04:05.000000"),
+						info.Pid, event.Capability)
+				}
+
+				// Stack resolved — printed in both cases
 				for i, f := range resolvedFrames {
 					fmt.Printf("      [%2d] %s\n", i, f.Display())
 				}
-				debugStore.RecordDebug(event)
 			}
 
 		case "enforce":

@@ -128,10 +128,11 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
         return 0;
 
     int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
+    // If the stack map is full, notify via drop_counters
     if (stack_id < 0) {
         u32 key = DROP_STACK_FULL;
         u64 *cnt = bpf_map_lookup_elem(&drop_counters, &key);
-        if (cnt) __sync_fetch_and_add(cnt, 1);
+        if (cnt) __sync_fetch_and_add(cnt, 1); // Atomic increment of the counter
         return 0;
     }
 
