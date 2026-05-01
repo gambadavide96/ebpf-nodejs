@@ -10,13 +10,12 @@ import (
 
 // Violation represents a single detected policy breach.
 type Violation struct {
-	Time        time.Time
-	Pid         uint32
-	Syscall     string
-	Capability  string
-	Package     string   // "[unattributed]" when the event had no attribution
-	CallPath    []string // empty for unattributed violations
-	FromFdOwner bool
+	Time       time.Time
+	Pid        uint32
+	Syscall    string
+	Capability string
+	Package    string   // "[unattributed]" when the event had no attribution
+	CallPath   []string // empty for unattributed violations
 }
 
 func (v Violation) String() string {
@@ -24,14 +23,10 @@ func (v Violation) String() string {
 	if path == "" {
 		path = "<unattributed>"
 	}
-	fdOwnerTag := ""
-	if v.FromFdOwner {
-		fdOwnerTag = " [fd_owner]"
-	}
 	return fmt.Sprintf(
-		"[%s] 🚨 VIOLATION  pid=%-6d  cap=%-28s  pkg=%s%s  path=%s",
+		"[%s] 🚨 VIOLATION  pid=%-6d  cap=%-28s  pkg=%s  path=%s",
 		v.Time.Format("15:04:05.000000"),
-		v.Pid, v.Capability, v.Package, fdOwnerTag, path,
+		v.Pid, v.Capability, v.Package, path,
 	)
 }
 
@@ -40,8 +35,6 @@ func (v Violation) String() string {
 // In this implementation the enforcement action is always logging: when a
 // violation is detected the engine prints a warning to stdout and records it
 // internally for the end-of-session summary. The application is not terminated.
-// This is the safest deployment model for an initial enforcement run and
-// mirrors the "forensics" mode described in GoLeash Section 4.7.
 type EnforcementEngine struct {
 	policy             Policy
 	unattributedPolicy *UnattributedPolicy
@@ -80,7 +73,7 @@ func LoadEnforcementEngine(policyPath, unattributedPath string) (*EnforcementEng
 //  1. Attributed check (per-package policy):
 //     If the event was attributed to a specific package, verify that
 //     (package, capability, call_path_hash) all appear in the approved policy.
-//     This is the primary enforcement layer — equivalent to GoLeash's model.
+//     This is the primary enforcement layer.
 //
 //  2. Unattributed check (safety net):
 //     If attribution failed (async path, worker thread pool), verify that
