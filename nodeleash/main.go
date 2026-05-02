@@ -24,12 +24,13 @@ import (
 )
 
 // SyscallInfo mirrors ebpf_syscall_info in trace.c.
-// 20 bytes, naturally aligned — must match exactly (binary.Read is used).
+// 24 bytes, naturally aligned — must match exactly (binary.Read is used).
 type SyscallInfo struct {
-	TimestampNs uint64
-	Pid         uint32
-	SyscallId   uint32
-	StackId     int32
+	TimestampNs  uint64
+	Pid          uint32
+	SyscallId    uint32
+	StackId      int32
+	AsyncStackId int32 // -1 if no async context, >= 0 if uprobes captured a JS context
 }
 
 func getSyscallName(id uint32) string {
@@ -57,6 +58,46 @@ func populateTrackedSyscalls(objs traceObjects) error {
 	return nil
 }
 
+// attachUprobes attaches the two uprobes needed for async attribution:
+//   - uv__work_submit: captures JS stack when async work is scheduled (main thread)
+//   - uv__fs_work: transfers the context to the worker TID (worker thread)
+//
+// Both symbols must be present in the Node.js binary. If not found (stripped
+// binary), uprobes are skipped and attribution falls back to UnattributedPolicy.
+// Returns the list of links to defer-close in main.
+func attachUprobes(pid uint32, objs traceObjects) []link.Link {
+	nodePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil {
+		log.Printf("⚠️  Cannot read node binary path: %v — uprobes disabled", err)
+		return nil
+	}
+
+	var links []link.Link
+
+	// uprobe on uv__work_submit — Step 1 of async attribution.
+	upWorkSubmit, err := link.Uprobe(nodePath, objs.TraceUvWorkSubmit,
+		&link.UprobeOptions{Symbol: "uv__work_submit"})
+	if err != nil {
+		log.Printf("⚠️  uprobe uv__work_submit not found: %v — async attribution disabled", err)
+		return nil
+	}
+	links = append(links, upWorkSubmit)
+	fmt.Println("   uprobe attached: uv__work_submit")
+
+	// uprobe on uv__fs_work — Step 2 of async attribution.
+	upFsWork, err := link.Uprobe(nodePath, objs.TraceUvFsWork,
+		&link.UprobeOptions{Symbol: "uv__fs_work"})
+	if err != nil {
+		log.Printf("⚠️  uprobe uv__fs_work not found: %v — async attribution disabled", err)
+		upWorkSubmit.Close()
+		return nil
+	}
+	links = append(links, upFsWork)
+	fmt.Println("   uprobe attached: uv__fs_work")
+
+	return links
+}
+
 // checkDropCounters warns if events were silently lost during the session.
 func checkDropCounters(objs traceObjects) {
 	var stackDrops, ringDrops uint64
@@ -70,23 +111,6 @@ func checkDropCounters(objs traceObjects) {
 		fmt.Printf("   Consider increasing max_entries in trace.c\n")
 	}
 }
-
-// =========================================================================
-// CLI
-//
-// Analyze mode — build a policy from a live Node.js process:
-//   sudo ./nodeleash analyze <PID> [--debug]
-//
-// Enforce mode — monitor against an existing policy and log violations:
-//   sudo ./nodeleash enforce <PID> \
-//       --policy       <path/to/nodeleash_policy_pid<N>_<ts>.json> \
-//       --unattributed <path/to/nodeleash_unattributed_pid<N>_<ts>.json>
-//
-// Both modes share the same eBPF infrastructure (trace.c, Blazesym,
-// ring buffer). The only difference is what happens per event:
-//   analyze: record into Policy / UnattributedPolicy
-//   enforce: check against EnforcementEngine, log violations to terminal
-// =========================================================================
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `NodeLeash — npm package-level syscall policy enforcement
@@ -114,7 +138,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mode := os.Args[1] // "analyze" or "enforce"
+	mode := os.Args[1]
 	pidStr := os.Args[2]
 
 	targetPID, err := strconv.ParseUint(pidStr, 10, 32)
@@ -122,14 +146,10 @@ func main() {
 		log.Fatalf("Invalid PID %q: %v", pidStr, err)
 	}
 
-	// Parse mode-specific flags from the remaining arguments.
 	args := os.Args[3:]
 
 	var (
-		// analyze flags
-		debugMode bool
-
-		// enforce flags
+		debugMode        bool
 		policyPath       string
 		unattributedPath string
 	)
@@ -168,7 +188,7 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// eBPF setup — identical for both modes
+	// eBPF setup
 	// -------------------------------------------------------------------------
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal(err)
@@ -180,14 +200,11 @@ func main() {
 	}
 	defer objs.Close()
 
-	// Register root PID. trace.c propagates it to child processes via trace_fork.
 	pidKey, pidVal := uint32(targetPID), uint32(1)
 	if err := objs.TargetPidMap.Put(&pidKey, &pidVal); err != nil {
 		log.Fatalf("Inserting PID: %v", err)
 	}
 
-	// Populate kernel-side syscall filter from the capability taxonomy.
-	// Infrastructure syscalls (futex, epoll_wait...) are dropped in the kernel.
 	if err := populateTrackedSyscalls(objs); err != nil {
 		log.Fatalf("Populating syscall filter: %v", err)
 	}
@@ -210,18 +227,24 @@ func main() {
 	}
 	defer tpExit.Close()
 
+	// Attach uprobes for async attribution.
+	// Graceful degradation: if the symbols are not found (stripped binary),
+	// NodeLeash continues without async attribution.
+	uprobeLinks := attachUprobes(uint32(targetPID), objs)
+	for _, l := range uprobeLinks {
+		defer l.Close()
+	}
+	asyncEnabled := len(uprobeLinks) == 2
+
 	// -------------------------------------------------------------------------
 	// Mode-specific state
 	// -------------------------------------------------------------------------
 	var (
-		// Analyze mode
 		policy             Policy
 		unattributedPolicy *UnattributedPolicy
 		debugStore         callPathDebugStore
 		rawTracker         map[string]map[string][]string
-
-		// Enforce mode
-		engine *EnforcementEngine
+		engine             *EnforcementEngine
 	)
 
 	switch mode {
@@ -231,6 +254,11 @@ func main() {
 		debugStore = make(callPathDebugStore)
 		rawTracker = make(map[string]map[string][]string)
 		fmt.Printf("🔍 NodeLeash [ANALYZE] — PID: %d\n", targetPID)
+		if asyncEnabled {
+			fmt.Println("   Async attribution: enabled (uprobes on libuv)")
+		} else {
+			fmt.Println("   Async attribution: disabled (symbols not found)")
+		}
 		if debugMode {
 			fmt.Println("   [--debug: stacks printed, call paths saved to JSON]")
 		}
@@ -246,7 +274,6 @@ func main() {
 
 	symb := NewBlazeSymbolizer()
 
-	// Boot time offset: convert eBPF CLOCK_MONOTONIC timestamps to wall clock.
 	var ts unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
 		log.Fatalf("ClockGettime: %v", err)
@@ -274,11 +301,6 @@ func main() {
 
 	// =========================================================================
 	// EVENT LOOP
-	//
-	// Steps 1–5 are identical in both modes: decode the event, resolve symbols,
-	// build the attributed stack. Step 6 branches on mode:
-	//   analyze → record into policy structures
-	//   enforce → check against EnforcementEngine, log violations
 	// =========================================================================
 	for {
 		record, err := rd.Read()
@@ -292,14 +314,14 @@ func main() {
 			continue
 		}
 
-		// Step 1: decode fixed-size event header from trace.c.
+		// Step 1: decode event.
 		var info SyscallInfo
 		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &info); err != nil {
 			log.Printf("Decode error: %v", err)
 			continue
 		}
 
-		// Step 2: retrieve current stack addresses from the eBPF stack map.
+		// Step 2: retrieve stack addresses.
 		var rawFrames [127]uint64
 		if err := objs.StackMap.Lookup(&info.StackId, &rawFrames); err != nil {
 			continue
@@ -317,33 +339,55 @@ func main() {
 
 		syscallName := getSyscallName(info.SyscallId)
 
-		// Step 3: resolve instruction pointers → ResolvedFrame{Name, Module}.
-		// Name: from Blazesym (V8 perf map for JS, ELF for Node binary).
-		// Module: from /proc/<pid>/maps — available even for unresolved symbols.
-		// Requires Node.js started with --perf-basic-prof for JS frame names.
+		// Step 3: resolve symbols.
 		resolvedFrames := symb.ResolveBatch(validIPs, info.Pid)
 
-		// Step 4 (analyze only): record raw stack before any filtering.
+		// Step 4 (analyze only): record raw stack.
 		if mode == "analyze" {
 			recordRawStack(rawTracker, syscallName, resolvedFrames)
 		}
 
-		// Step 5: classify frames, build call path, map syscall → capability.
-		// Returns (event, true) for attributed events.
-		// Returns (AnalyzedStack{Capability: cap}, false) for unattributed.
-		// Attribution works only when the JS frame is present on the native
-		// stack at the moment of the syscall (synchronous/quasi-synchronous
-		// execution). Deferred async I/O via libuv or the worker thread pool
-		// produces stacks with no user-land frames → UnattributedPolicy.
-		event, ok := AnalyzeStack(syscallName, resolvedFrames)
+		// Step 5: resolve async frames if uprobes captured a context.
+		// async_stack_id >= 0 means the worker thread that executed this syscall
+		// was previously registered by trace_uv_fs_work with a JS stack from
+		// the scheduling point (uv__work_submit in the main thread).
+		var asyncFrames []ResolvedFrame
+		if info.AsyncStackId >= 0 {
+			var asyncRaw [127]uint64
+			asyncID := uint32(info.AsyncStackId)
+			if err := objs.StackMap.Lookup(&asyncID, &asyncRaw); err == nil {
+				var asyncIPs []uint64
+				for _, ip := range asyncRaw {
+					if ip == 0 {
+						break
+					}
+					asyncIPs = append(asyncIPs, ip)
+				}
+				if len(asyncIPs) > 0 {
+					asyncFrames = symb.ResolveBatch(asyncIPs, info.Pid)
+				}
+			}
+		}
 
-		// Step 6: branch on mode.
+		// Step 6: attribute. Try direct stack first; fall back to async frames.
+		event, ok := AnalyzeStack(syscallName, resolvedFrames)
+		if !ok && len(asyncFrames) > 0 {
+			event, ok = AnalyzeStack(syscallName, asyncFrames)
+			if ok {
+				// Mark the source of attribution for debug output
+				event.Responsible = event.Responsible + " [async]"
+			}
+		}
+
+		// Step 7: branch on mode.
 		switch mode {
 		case "analyze":
 			if ok {
+				// Strip the [async] marker before recording — it's only for debug
+				responsible := strings.TrimSuffix(event.Responsible, " [async]")
+				event.Responsible = responsible
 				policy.Record(event)
 			} else if event.Capability != "" {
-				// Unattributed but capability known: feed the safety net.
 				unattributedPolicy.Record(event.Capability)
 			}
 
@@ -351,29 +395,37 @@ func main() {
 				eventTime := bootTime.Add(time.Duration(info.TimestampNs))
 
 				if ok {
-					// Attributed event
-					fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s\n",
+					asyncMarker := ""
+					if len(asyncFrames) > 0 && info.AsyncStackId >= 0 &&
+						strings.Contains(event.Responsible, "[async]") {
+						asyncMarker = " [via uprobe]"
+					}
+					fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s%s\n",
 						eventTime.Format("15:04:05.000000"),
-						info.Pid, event.Capability, event.Responsible)
+						info.Pid, event.Capability,
+						strings.TrimSuffix(event.Responsible, " [async]"),
+						asyncMarker)
 					fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
 					debugStore.RecordDebug(event)
 				} else if event.Capability != "" {
-					// Unattributed event but with known capability
 					fmt.Printf("\n🕒 [%s] [PID:%d] %s → [unattributed]\n",
 						eventTime.Format("15:04:05.000000"),
 						info.Pid, event.Capability)
 				}
 
-				// Stack resolved — printed in both cases
+				fmt.Println("   --- current stack ---")
 				for i, f := range resolvedFrames {
 					fmt.Printf("      [%2d] %s\n", i, f.Display())
+				}
+				if len(asyncFrames) > 0 {
+					fmt.Println("   --- async stack (from uprobe) ---")
+					for i, f := range asyncFrames {
+						fmt.Printf("      [%2d] %s\n", i, f.Display())
+					}
 				}
 			}
 
 		case "enforce":
-			// Pass the event to the engine regardless of attribution status.
-			// Check() handles both cases: attributed events go through the
-			// per-package policy; unattributed events go through the safety net.
 			engine.Check(event, info.Pid, syscallName)
 		}
 	}
