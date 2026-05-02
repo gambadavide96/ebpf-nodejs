@@ -1,6 +1,6 @@
 package main
 
-//Specific target for x86_64:
+// Specific target for x86_64:
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target amd64 trace trace.c
 
 import (
@@ -59,46 +59,101 @@ func populateTrackedSyscalls(objs traceObjects) error {
 	return nil
 }
 
-// attachUprobes attaches the two uprobes needed for async attribution:
-//   - uv__work_submit: captures JS stack when async work is scheduled (main thread)
-//   - uv__fs_work: transfers the context to the worker TID (worker thread)
+// uprobeSpec describes a single uprobe to attach.
+type uprobeSpec struct {
+	symbol   string
+	prog     interface{ FD() int } // *ebpf.Program
+	category string                // "thread-pool" or "event-loop"
+}
+
+// attachUprobes attaches all libuv uprobes for async attribution.
 //
-// Both symbols must be present in the Node.js binary. If not found (stripped
-// binary), uprobes are skipped and attribution falls back to UnattributedPolicy.
-// Returns the list of links to defer-close in main.
-func attachUprobes(pid uint32, objs traceObjects) []link.Link {
+// Two categories:
+//
+//	Thread-pool (filesystem, DNS):
+//	  uv__work_submit     — main thread scheduling point (all pool ops)
+//	  uv__fs_work         — worker entry for filesystem ops
+//	  uv__getaddrinfo_work — worker entry for DNS lookup
+//
+//	Event-loop / main thread (network):
+//	  uv_write            — TCP stream write
+//	  uv_read_start       — TCP stream read registration
+//	  uv__tcp_connect     — TCP connection initiation
+//	  uv_udp_send         — UDP send
+//	  uv_udp_recv_start   — UDP receive registration
+//
+// Graceful degradation: if any symbol is missing the uprobe is skipped
+// and a warning is printed. NodeLeash continues with partial coverage.
+func attachUprobes(pid uint32, objs traceObjects) ([]link.Link, int) {
 	nodePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
 	if err != nil {
 		log.Printf("⚠️  Cannot read node binary path: %v — uprobes disabled", err)
-		return nil
+		return nil, 0
 	}
 
 	ex, err := link.OpenExecutable(nodePath)
 	if err != nil {
-		log.Printf("⚠️  Cannot open executable %s: %v — uprobes disabled", nodePath, err)
-		return nil
+		log.Printf("⚠️  Cannot open executable: %v — uprobes disabled", err)
+		return nil, 0
+	}
+
+	type spec struct {
+		symbol string
+		prog   interface {
+			FD() int
+		}
+	}
+
+	// Ordered list — uv__work_submit must succeed for thread-pool ops to work.
+	// Event-loop uprobes are independent and can partially succeed.
+	entries := []struct {
+		symbol string
+		attach func() (link.Link, error)
+	}{
+		// Category A — thread pool
+		{"uv__work_submit", func() (link.Link, error) {
+			return ex.Uprobe("uv__work_submit", objs.TraceUvWorkSubmit, nil)
+		}},
+		{"uv__fs_work", func() (link.Link, error) {
+			return ex.Uprobe("uv__fs_work", objs.TraceUvFsWork, nil)
+		}},
+		{"uv__getaddrinfo_work", func() (link.Link, error) {
+			return ex.Uprobe("uv__getaddrinfo_work", objs.TraceUvGetaddrinfoWork, nil)
+		}},
+
+		// Category B — event loop / main thread
+		{"uv_write", func() (link.Link, error) {
+			return ex.Uprobe("uv_write", objs.TraceUvWrite, nil)
+		}},
+		{"uv_read_start", func() (link.Link, error) {
+			return ex.Uprobe("uv_read_start", objs.TraceUvReadStart, nil)
+		}},
+		{"uv__tcp_connect", func() (link.Link, error) {
+			return ex.Uprobe("uv__tcp_connect", objs.TraceUvTcpConnect, nil)
+		}},
+		{"uv_udp_send", func() (link.Link, error) {
+			return ex.Uprobe("uv_udp_send", objs.TraceUvUdpSend, nil)
+		}},
+		{"uv_udp_recv_start", func() (link.Link, error) {
+			return ex.Uprobe("uv_udp_recv_start", objs.TraceUvUdpRecvStart, nil)
+		}},
 	}
 
 	var links []link.Link
+	attached := 0
 
-	upWorkSubmit, err := ex.Uprobe("uv__work_submit", objs.TraceUvWorkSubmit, nil)
-	if err != nil {
-		log.Printf("⚠️  uprobe uv__work_submit: %v — async attribution disabled", err)
-		return nil
+	for _, e := range entries {
+		l, err := e.attach()
+		if err != nil {
+			log.Printf("⚠️  uprobe %s not found: %v", e.symbol, err)
+			continue
+		}
+		links = append(links, l)
+		attached++
+		fmt.Printf("   uprobe attached: %s\n", e.symbol)
 	}
-	links = append(links, upWorkSubmit)
-	fmt.Println("   uprobe attached: uv__work_submit")
 
-	upFsWork, err := ex.Uprobe("uv__fs_work", objs.TraceUvFsWork, nil)
-	if err != nil {
-		log.Printf("⚠️  uprobe uv__fs_work: %v — async attribution disabled", err)
-		upWorkSubmit.Close()
-		return nil
-	}
-	links = append(links, upFsWork)
-	fmt.Println("   uprobe attached: uv__fs_work")
-
-	return links
+	return links, attached
 }
 
 // checkDropCounters warns if events were silently lost during the session.
@@ -230,14 +285,11 @@ func main() {
 	}
 	defer tpExit.Close()
 
-	// Attach uprobes for async attribution.
-	// Graceful degradation: if the symbols are not found (stripped binary),
-	// NodeLeash continues without async attribution.
-	uprobeLinks := attachUprobes(uint32(targetPID), objs)
+	// Attach uprobes — graceful degradation if symbols are missing.
+	uprobeLinks, attachedCount := attachUprobes(uint32(targetPID), objs)
 	for _, l := range uprobeLinks {
 		defer l.Close()
 	}
-	asyncEnabled := len(uprobeLinks) == 2
 
 	// -------------------------------------------------------------------------
 	// Mode-specific state
@@ -257,11 +309,7 @@ func main() {
 		debugStore = make(callPathDebugStore)
 		rawTracker = make(map[string]map[string][]string)
 		fmt.Printf("🔍 NodeLeash [ANALYZE] — PID: %d\n", targetPID)
-		if asyncEnabled {
-			fmt.Println("   Async attribution: enabled (uprobes on libuv)")
-		} else {
-			fmt.Println("   Async attribution: disabled (symbols not found)")
-		}
+		fmt.Printf("   Async attribution: %d/8 uprobes attached\n", attachedCount)
 		if debugMode {
 			fmt.Println("   [--debug: stacks printed, call paths saved to JSON]")
 		}
@@ -272,6 +320,7 @@ func main() {
 			log.Fatalf("Loading enforcement engine: %v", err)
 		}
 		fmt.Printf("🛡️  NodeLeash [ENFORCE] — PID: %d\n", targetPID)
+		fmt.Printf("   Async attribution: %d/8 uprobes attached\n", attachedCount)
 		fmt.Println("   Violations will be logged to stdout.")
 	}
 
@@ -350,10 +399,7 @@ func main() {
 			recordRawStack(rawTracker, syscallName, resolvedFrames)
 		}
 
-		// Step 5: resolve async frames if uprobes captured a context.
-		// async_stack_id >= 0 means the worker thread that executed this syscall
-		// was previously registered by trace_uv_fs_work with a JS stack from
-		// the scheduling point (uv__work_submit in the main thread).
+		// Step 5: resolve async frames if a uprobe registered context for this event.
 		var asyncFrames []ResolvedFrame
 		if info.AsyncStackId >= 0 {
 			var asyncRaw [127]uint64
@@ -374,21 +420,16 @@ func main() {
 
 		// Step 6: attribute. Try direct stack first; fall back to async frames.
 		event, ok := AnalyzeStack(syscallName, resolvedFrames)
+		fromUprobe := false
 		if !ok && len(asyncFrames) > 0 {
 			event, ok = AnalyzeStack(syscallName, asyncFrames)
-			if ok {
-				// Mark the source of attribution for debug output
-				event.Responsible = event.Responsible + " [async]"
-			}
+			fromUprobe = ok
 		}
 
 		// Step 7: branch on mode.
 		switch mode {
 		case "analyze":
 			if ok {
-				// Strip the [async] marker before recording — it's only for debug
-				responsible := strings.TrimSuffix(event.Responsible, " [async]")
-				event.Responsible = responsible
 				policy.Record(event)
 			} else if event.Capability != "" {
 				unattributedPolicy.Record(event.Capability)
@@ -398,16 +439,13 @@ func main() {
 				eventTime := bootTime.Add(time.Duration(info.TimestampNs))
 
 				if ok {
-					asyncMarker := ""
-					if len(asyncFrames) > 0 && info.AsyncStackId >= 0 &&
-						strings.Contains(event.Responsible, "[async]") {
-						asyncMarker = " [via uprobe]"
+					uprobe := ""
+					if fromUprobe {
+						uprobe = " [via uprobe]"
 					}
 					fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s%s\n",
 						eventTime.Format("15:04:05.000000"),
-						info.Pid, event.Capability,
-						strings.TrimSuffix(event.Responsible, " [async]"),
-						asyncMarker)
+						info.Pid, event.Capability, event.Responsible, uprobe)
 					fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
 					debugStore.RecordDebug(event)
 				} else if event.Capability != "" {

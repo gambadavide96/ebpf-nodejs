@@ -12,6 +12,7 @@ const (
 	CapSendData         = "CAP_SEND_DATA"
 	CapReceiveData      = "CAP_RECEIVE_DATA"
 	CapExec             = "CAP_EXEC"
+	CapThread           = "CAP_THREAD"
 	CapTerminate        = "CAP_TERMINATE_PROCESS"
 	CapReadSystemState  = "CAP_READ_SYSTEM_STATE"
 	CapWriteSystemState = "CAP_WRITE_SYSTEM_STATE"
@@ -43,12 +44,9 @@ var syscallToCapability = map[string]string{
 
 	"unlink": CapDeleteFile, "unlinkat": CapDeleteFile, "rmdir": CapDeleteFile,
 
-	"close": CapFile, "dup": CapFile, "dup2": CapFile, "dup3": CapFile,
-	"poll": CapFile, "ppoll": CapFile,
-	"epoll_wait": CapFile, "epoll_pwait": CapFile,
-	"epoll_ctl": CapFile, "epoll_create1": CapFile,
-	"select": CapFile, "pselect6": CapFile,
-	"fcntl": CapFile, "pipe": CapFile, "pipe2": CapFile,
+	"close": CapFile, "dup": CapFile, "dup2": CapFile,
+	"dup3": CapFile, "fcntl": CapFile, "pipe": CapFile,
+	"pipe2": CapFile,
 
 	"chmod": CapFileMetadata, "fchmod": CapFileMetadata,
 	"chown": CapFileMetadata, "fchown": CapFileMetadata, "lchown": CapFileMetadata,
@@ -66,7 +64,9 @@ var syscallToCapability = map[string]string{
 	"recvmsg": CapReceiveData, "recvmmsg": CapReceiveData,
 
 	"execve": CapExec, "execveat": CapExec,
-	"clone": CapExec, "clone3": CapExec, "fork": CapExec, "vfork": CapExec,
+	"fork": CapExec, "vfork": CapExec,
+
+	"clone": CapThread, "clone3": CapThread,
 
 	"exit": CapTerminate, "exit_group": CapTerminate,
 	"kill": CapTerminate, "tgkill": CapTerminate, "tkill": CapTerminate,
