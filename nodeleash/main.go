@@ -1,6 +1,7 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpf trace trace.c
+//Specific target for x86_64:
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target amd64 trace trace.c
 
 import (
 	"bytes"
@@ -72,23 +73,25 @@ func attachUprobes(pid uint32, objs traceObjects) []link.Link {
 		return nil
 	}
 
+	ex, err := link.OpenExecutable(nodePath)
+	if err != nil {
+		log.Printf("⚠️  Cannot open executable %s: %v — uprobes disabled", nodePath, err)
+		return nil
+	}
+
 	var links []link.Link
 
-	// uprobe on uv__work_submit — Step 1 of async attribution.
-	upWorkSubmit, err := link.Uprobe(nodePath, objs.TraceUvWorkSubmit,
-		&link.UprobeOptions{Symbol: "uv__work_submit"})
+	upWorkSubmit, err := ex.Uprobe("uv__work_submit", objs.TraceUvWorkSubmit, nil)
 	if err != nil {
-		log.Printf("⚠️  uprobe uv__work_submit not found: %v — async attribution disabled", err)
+		log.Printf("⚠️  uprobe uv__work_submit: %v — async attribution disabled", err)
 		return nil
 	}
 	links = append(links, upWorkSubmit)
 	fmt.Println("   uprobe attached: uv__work_submit")
 
-	// uprobe on uv__fs_work — Step 2 of async attribution.
-	upFsWork, err := link.Uprobe(nodePath, objs.TraceUvFsWork,
-		&link.UprobeOptions{Symbol: "uv__fs_work"})
+	upFsWork, err := ex.Uprobe("uv__fs_work", objs.TraceUvFsWork, nil)
 	if err != nil {
-		log.Printf("⚠️  uprobe uv__fs_work not found: %v — async attribution disabled", err)
+		log.Printf("⚠️  uprobe uv__fs_work: %v — async attribution disabled", err)
 		upWorkSubmit.Close()
 		return nil
 	}
