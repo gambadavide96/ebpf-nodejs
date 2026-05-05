@@ -31,7 +31,7 @@ type SyscallInfo struct {
 	Pid          uint32
 	SyscallId    uint32
 	StackId      int32
-	AsyncStackId int32 // -1 if no async context, >= 0 if uprobes captured a JS context
+	AsyncStackId int32 // -1 = no async context; >= 0 = stack_id from uprobe or fd map
 }
 
 func getSyscallName(id uint32) string {
@@ -59,31 +59,24 @@ func populateTrackedSyscalls(objs traceObjects) error {
 	return nil
 }
 
-// uprobeSpec describes a single uprobe to attach.
-type uprobeSpec struct {
-	symbol   string
-	prog     interface{ FD() int } // *ebpf.Program
-	category string                // "thread-pool" or "event-loop"
-}
-
 // attachUprobes attaches all libuv uprobes for async attribution.
 //
-// Two categories:
+// Thread-pool probes (Category A — covers fs.*, dns.*):
 //
-//	Thread-pool (filesystem, DNS):
-//	  uv__work_submit     — main thread scheduling point (all pool ops)
-//	  uv__fs_work         — worker entry for filesystem ops
-//	  uv__getaddrinfo_work — worker entry for DNS lookup
+//	uv__work_submit      uprobe    — captures JS context on main thread at submission
+//	uv__fs_work          uprobe    — transfers context to worker thread (filesystem)
+//	uv__fs_work          uretprobe — cleans up worker context after all I/O syscalls
+//	uv__getaddrinfo_work uprobe    — transfers context to worker thread (DNS)
+//	uv__getaddrinfo_work uretprobe — cleans up worker context after DNS syscalls
 //
-//	Event-loop / main thread (network):
-//	  uv_write            — TCP stream write
-//	  uv_read_start       — TCP stream read registration
-//	  uv__tcp_connect     — TCP connection initiation
-//	  uv_udp_send         — UDP send
-//	  uv_udp_recv_start   — UDP receive registration
+// Network attribution is handled entirely inside trace.c via the fd_attribution_map
+// (trace_sys_enter stages on socket()/accept(), trace_sys_exit promotes to fd map)
+// and requires no uprobes.
 //
-// Graceful degradation: if any symbol is missing the uprobe is skipped
-// and a warning is printed. NodeLeash continues with partial coverage.
+// Graceful degradation: if any symbol is absent the uprobe is skipped and a
+// warning is printed. If uv__work_submit is attached but no worker uprobes are
+// (e.g. stripped binary), an explicit warning is emitted because the uv_work_map
+// would accumulate stale entries without the corresponding cleanup path.
 func attachUprobes(pid uint32, objs traceObjects) ([]link.Link, int) {
 	nodePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
 	if err != nil {
@@ -97,60 +90,64 @@ func attachUprobes(pid uint32, objs traceObjects) ([]link.Link, int) {
 		return nil, 0
 	}
 
-	type spec struct {
-		symbol string
-		prog   interface {
-			FD() int
-		}
+	type entry struct {
+		label  string
+		attach func() (link.Link, error)
 	}
 
-	// Ordered list — uv__work_submit must succeed for thread-pool ops to work.
-	// Event-loop uprobes are independent and can partially succeed.
-	entries := []struct {
-		symbol string
-		attach func() (link.Link, error)
-	}{
-		// Category A — thread pool
-		{"uv__work_submit", func() (link.Link, error) {
+	entries := []entry{
+		// ---- thread pool: submission (main thread) ----
+		{"uprobe:uv__work_submit", func() (link.Link, error) {
 			return ex.Uprobe("uv__work_submit", objs.TraceUvWorkSubmit, nil)
 		}},
-		{"uv__fs_work", func() (link.Link, error) {
+
+		// ---- thread pool: filesystem worker (entry + exit) ----
+		{"uprobe:uv__fs_work", func() (link.Link, error) {
 			return ex.Uprobe("uv__fs_work", objs.TraceUvFsWork, nil)
 		}},
-		{"uv__getaddrinfo_work", func() (link.Link, error) {
-			return ex.Uprobe("uv__getaddrinfo_work", objs.TraceUvGetaddrinfoWork, nil)
+		{"uretprobe:uv__fs_work", func() (link.Link, error) {
+			return ex.Uretprobe("uv__fs_work", objs.TraceUvFsWorkRet, nil)
 		}},
 
-		// Category B — event loop / main thread
-		{"uv_write", func() (link.Link, error) {
-			return ex.Uprobe("uv_write", objs.TraceUvWrite, nil)
+		// ---- thread pool: DNS worker (entry + exit) ----
+		{"uprobe:uv__getaddrinfo_work", func() (link.Link, error) {
+			return ex.Uprobe("uv__getaddrinfo_work", objs.TraceUvGetaddrinfoWork, nil)
 		}},
-		{"uv_read_start", func() (link.Link, error) {
-			return ex.Uprobe("uv_read_start", objs.TraceUvReadStart, nil)
-		}},
-		{"uv__tcp_connect", func() (link.Link, error) {
-			return ex.Uprobe("uv__tcp_connect", objs.TraceUvTcpConnect, nil)
-		}},
-		{"uv_udp_send", func() (link.Link, error) {
-			return ex.Uprobe("uv_udp_send", objs.TraceUvUdpSend, nil)
-		}},
-		{"uv_udp_recv_start", func() (link.Link, error) {
-			return ex.Uprobe("uv_udp_recv_start", objs.TraceUvUdpRecvStart, nil)
+		{"uretprobe:uv__getaddrinfo_work", func() (link.Link, error) {
+			return ex.Uretprobe("uv__getaddrinfo_work", objs.TraceUvGetaddrinfoWorkRet, nil)
 		}},
 	}
 
 	var links []link.Link
 	attached := 0
+	submitAttached := false
+	workerEntryAttached := 0
 
 	for _, e := range entries {
 		l, err := e.attach()
 		if err != nil {
-			log.Printf("⚠️  uprobe %s not found: %v", e.symbol, err)
+			log.Printf("⚠️  %s not found: %v", e.label, err)
 			continue
 		}
 		links = append(links, l)
 		attached++
-		fmt.Printf("   uprobe attached: %s\n", e.symbol)
+		fmt.Printf("   attached: %s\n", e.label)
+
+		if e.label == "uprobe:uv__work_submit" {
+			submitAttached = true
+		}
+		if e.label == "uprobe:uv__fs_work" || e.label == "uprobe:uv__getaddrinfo_work" {
+			workerEntryAttached++
+		}
+	}
+
+	// Warn when the thread-pool bridge is half-attached: uv__work_submit will
+	// populate uv_work_map but nobody will ever drain it, causing the map to
+	// fill up silently over time.
+	if submitAttached && workerEntryAttached == 0 {
+		log.Printf("⚠️  uv__work_submit attached but no worker uprobes found.")
+		log.Printf("    Thread-pool attribution disabled (stripped binary?).")
+		log.Printf("    uv_work_map entries will accumulate without cleanup.")
 	}
 
 	return links, attached
@@ -269,23 +266,32 @@ func main() {
 
 	tpSysEnter, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
 	if err != nil {
-		log.Fatalf("sys_enter: %v", err)
+		log.Fatalf("sys_enter tracepoint: %v", err)
 	}
 	defer tpSysEnter.Close()
 
+	// sys_exit is used exclusively to capture the fd returned by socket()/accept().
+	// Its handler exits immediately for all other syscalls (single comparison).
+	tpSysExit, err := link.Tracepoint("raw_syscalls", "sys_exit", objs.TraceSysExit, nil)
+	if err != nil {
+		log.Fatalf("sys_exit tracepoint: %v", err)
+	}
+	defer tpSysExit.Close()
+
 	tpFork, err := link.Tracepoint("sched", "sched_process_fork", objs.TraceFork, nil)
 	if err != nil {
-		log.Fatalf("fork: %v", err)
+		log.Fatalf("fork tracepoint: %v", err)
 	}
 	defer tpFork.Close()
 
 	tpExit, err := link.Tracepoint("sched", "sched_process_exit", objs.TraceExit, nil)
 	if err != nil {
-		log.Fatalf("exit: %v", err)
+		log.Fatalf("exit tracepoint: %v", err)
 	}
 	defer tpExit.Close()
 
-	// Attach uprobes — graceful degradation if symbols are missing.
+	// Attach thread-pool uprobes. Network attribution needs no uprobes
+	// (handled entirely via sys_enter/sys_exit tracepoints in trace.c).
 	uprobeLinks, attachedCount := attachUprobes(uint32(targetPID), objs)
 	for _, l := range uprobeLinks {
 		defer l.Close()
@@ -309,7 +315,8 @@ func main() {
 		debugStore = make(callPathDebugStore)
 		rawTracker = make(map[string]map[string][]string)
 		fmt.Printf("🔍 NodeLeash [ANALYZE] — PID: %d\n", targetPID)
-		fmt.Printf("   Async attribution: %d/8 uprobes attached\n", attachedCount)
+		fmt.Printf("   Thread-pool attribution: %d/5 uprobes attached\n", attachedCount)
+		fmt.Printf("   Network attribution: active (fd-based, no uprobes required)\n")
 		if debugMode {
 			fmt.Println("   [--debug: stacks printed, call paths saved to JSON]")
 		}
@@ -320,7 +327,8 @@ func main() {
 			log.Fatalf("Loading enforcement engine: %v", err)
 		}
 		fmt.Printf("🛡️  NodeLeash [ENFORCE] — PID: %d\n", targetPID)
-		fmt.Printf("   Async attribution: %d/8 uprobes attached\n", attachedCount)
+		fmt.Printf("   Thread-pool attribution: %d/5 uprobes attached\n", attachedCount)
+		fmt.Printf("   Network attribution: active (fd-based, no uprobes required)\n")
 		fmt.Println("   Violations will be logged to stdout.")
 	}
 
@@ -353,6 +361,16 @@ func main() {
 
 	// =========================================================================
 	// EVENT LOOP
+	//
+	// Per-event steps:
+	//   1. Decode the fixed-size event header from trace.c.
+	//   2. Retrieve current stack addresses from the eBPF stack map.
+	//   3. Resolve current stack symbols via Blazesym.
+	//   4. (analyze only) Record raw stack for the raw report.
+	//   5. If async_stack_id >= 0, resolve async stack symbols.
+	//   6. Attribute: try current stack first (synchronous path),
+	//      fall back to async stack (uprobe or fd-based path).
+	//   7. Branch on mode: record into policy or check for violations.
 	// =========================================================================
 	for {
 		record, err := rd.Read()
@@ -366,14 +384,14 @@ func main() {
 			continue
 		}
 
-		// Step 1: decode event.
+		// Step 1: decode event header.
 		var info SyscallInfo
 		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &info); err != nil {
 			log.Printf("Decode error: %v", err)
 			continue
 		}
 
-		// Step 2: retrieve stack addresses.
+		// Step 2: retrieve current stack addresses.
 		var rawFrames [127]uint64
 		if err := objs.StackMap.Lookup(&info.StackId, &rawFrames); err != nil {
 			continue
@@ -391,15 +409,20 @@ func main() {
 
 		syscallName := getSyscallName(info.SyscallId)
 
-		// Step 3: resolve symbols.
+		// Step 3: resolve current stack.
 		resolvedFrames := symb.ResolveBatch(validIPs, info.Pid)
 
-		// Step 4 (analyze only): record raw stack.
+		// Step 4 (analyze only): record raw stack before filtering.
 		if mode == "analyze" {
 			recordRawStack(rawTracker, syscallName, resolvedFrames)
 		}
 
-		// Step 5: resolve async frames if a uprobe registered context for this event.
+		// Step 5: resolve async stack if trace.c found one.
+		// async_stack_id >= 0 means either:
+		//   - a thread-pool uprobe set tid_stack_map[worker_tid], or
+		//   - a prior socket() call set fd_attribution_map[fd].
+		// In both cases the async stack contains JS frames from the original
+		// JS call site, which AnalyzeStack can attribute to a package.
 		var asyncFrames []ResolvedFrame
 		if info.AsyncStackId >= 0 {
 			var asyncRaw [127]uint64
@@ -418,12 +441,13 @@ func main() {
 			}
 		}
 
-		// Step 6: attribute. Try direct stack first; fall back to async frames.
+		// Step 6: attribute.
+		// Priority: synchronous stack > async stack > UnattributedPolicy.
 		event, ok := AnalyzeStack(syscallName, resolvedFrames)
-		fromUprobe := false
+		fromAsync := false
 		if !ok && len(asyncFrames) > 0 {
 			event, ok = AnalyzeStack(syscallName, asyncFrames)
-			fromUprobe = ok
+			fromAsync = ok
 		}
 
 		// Step 7: branch on mode.
@@ -439,13 +463,13 @@ func main() {
 				eventTime := bootTime.Add(time.Duration(info.TimestampNs))
 
 				if ok {
-					uprobe := ""
-					if fromUprobe {
-						uprobe = " [via uprobe]"
+					tag := ""
+					if fromAsync {
+						tag = " [async]"
 					}
 					fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s%s\n",
 						eventTime.Format("15:04:05.000000"),
-						info.Pid, event.Capability, event.Responsible, uprobe)
+						info.Pid, event.Capability, event.Responsible, tag)
 					fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
 					debugStore.RecordDebug(event)
 				} else if event.Capability != "" {
@@ -459,7 +483,7 @@ func main() {
 					fmt.Printf("      [%2d] %s\n", i, f.Display())
 				}
 				if len(asyncFrames) > 0 {
-					fmt.Println("   --- async stack (from uprobe) ---")
+					fmt.Println("   --- async stack ---")
 					for i, f := range asyncFrames {
 						fmt.Printf("      [%2d] %s\n", i, f.Display())
 					}
