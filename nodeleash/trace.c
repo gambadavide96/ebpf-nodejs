@@ -10,6 +10,31 @@
 #define SYS_accept   43
 #define SYS_accept4  288
 
+#define SYS_read     0
+#define SYS_write    1
+#define SYS_readv    19
+#define SYS_writev   20
+#define SYS_sendto   44   
+                          
+#define SYS_recvfrom 45   
+#define SYS_sendmsg  46
+#define SYS_recvmsg  47
+#define SYS_recvmmsg 299
+#define SYS_sendmmsg 307
+
+static __always_inline bool is_data_transfer_syscall(u32 id) {
+    return id == SYS_read     ||
+           id == SYS_write    ||
+           id == SYS_readv    ||
+           id == SYS_writev   ||
+           id == SYS_sendto   ||
+           id == SYS_recvfrom ||
+           id == SYS_sendmsg  ||
+           id == SYS_recvmsg  ||
+           id == SYS_recvmmsg ||
+           id == SYS_sendmmsg;
+}
+
 // ============================================================================
 // EVENT STRUCTURE — mirrors SyscallInfo in main.go (24 bytes, no padding)
 // ============================================================================
@@ -122,11 +147,6 @@ struct {
 //   4. trace_sys_enter for close(fd):
 //        delete fd_attribution_map[fd]
 //
-// The same mechanism covers accept() / accept4(): the new fd inherits the
-// stack_id of the accept() call if a JS frame was present (e.g. a synchronous
-// accept in a test server). For production servers accept() is called from
-// libuv's I/O polling with no JS frame, so pending_socket_map[tid] will be
-// empty and the accepted fd remains unattributed (documented limitation).
 // ============================================================================
 
 // fd → stack_id (persistent across the socket's lifetime).
@@ -263,7 +283,7 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
     // Only consulted when no thread-pool context is present.
     // args[0] is the fd for read/write/recv/send/recvfrom/sendto/sendmsg/recvmsg.
     // For other syscalls the lookup simply returns NULL (no side effects).
-    if (async_stack_id < 0) {
+    if (async_stack_id < 0 && is_data_transfer_syscall(syscall_id)) {
         u32 fd = (u32)ctx->args[0];
         u32 *fd_sid = bpf_map_lookup_elem(&fd_attribution_map, &fd);
         if (fd_sid)
@@ -274,7 +294,7 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
     // When socket() is called with a JS frame on the stack (synchronous setup),
     // we need to carry the stack_id into trace_sys_exit where the new fd is
     // known. pending_socket_map[tid] is the staging area.
-    if (syscall_id == SYS_socket || syscall_id == SYS_accept || syscall_id == SYS_accept4) {
+    if (syscall_id == SYS_socket) {
         u32 sid = (u32)stack_id;
         bpf_map_update_elem(&pending_socket_map, &tid, &sid, BPF_ANY);
     }
@@ -317,7 +337,7 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
 SEC("tracepoint/raw_syscalls/sys_exit")
 int trace_sys_exit(struct sys_exit_args *ctx) {
     long id = ctx->id;
-    if (id != SYS_socket && id != SYS_accept && id != SYS_accept4)
+    if (id != SYS_socket)
         return 0;
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
