@@ -113,6 +113,9 @@ struct {
 // ============================================================================
 
 // uv__work address → stack_id (bridge across the main→worker thread boundary).
+// Bridge between main and worker threads for thread pool allocation.
+// The uv__work pointer is the only stable identifier shared between the two threads:
+// uv__work_submit (main, visible JS) writes here; uv__fs_work (worker) reads and transfers to tid_stack_map
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, __u64);   // address of uv__work struct
@@ -121,6 +124,9 @@ struct {
 } uv_work_map SEC(".maps");
 
 // TID → stack_id (active on worker threads during work item execution).
+// JS context active on the worker thread during the execution of a work item.
+// Populated by uv__fs_work / uv__getaddrinfo_work, read by trace_sys_enter for each syscall in the work item,
+// deleted by the uretprobe upon completion — guarantees attribution for all syscalls, not just the first one.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, __u32);   // thread TID
