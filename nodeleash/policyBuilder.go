@@ -14,13 +14,7 @@ import (
 // Policy — per-package attributed enforcement
 // -----------------------------------------------------------------------
 
-// Policy: Package → Capability → CallPathHash.
-// Mirrors GoLeash's formal allowlist: A = { (Pi, { (Cij, T_ij) }) }
-// where T_ij is stored as a set of call path hashes.
-//
-// Call path hashes enable context-aware enforcement (confused deputy defense):
-// the same (package, capability) is allowed only when the full call context
-// also matches a previously observed trusted path.
+// Policy: Package → Syscall → CallPathHash.
 type Policy map[string]map[string]map[string]bool
 
 type PackageEntry struct {
@@ -29,31 +23,31 @@ type PackageEntry struct {
 }
 
 type SyscallsEntry struct {
-	Syscall        string   `json:"syscalls"`
+	Syscall        string   `json:"syscall"`
 	CallPathHashes []string `json:"call_path_hashes"`
 }
 
 func NewPolicy() Policy { return make(Policy) }
 
 func (p Policy) Record(event AnalyzedStack) {
-	pkg, cap, hash := event.Responsible, event.Syscall, event.CallPathHash
+	pkg, sys, hash := event.Responsible, event.Syscall, event.CallPathHash
 	if p[pkg] == nil {
 		p[pkg] = make(map[string]map[string]bool)
 	}
-	if p[pkg][cap] == nil {
-		p[pkg][cap] = make(map[string]bool)
+	if p[pkg][sys] == nil {
+		p[pkg][sys] = make(map[string]bool)
 	}
-	p[pkg][cap][hash] = true
+	p[pkg][sys][hash] = true
 }
 
 // CheckViolation returns true if the event violates the policy.
-// All three of (package, capability, call_path_hash) must match.
+// All three of (package, syscall, call_path_hash) must match.
 func (p Policy) CheckViolation(event AnalyzedStack) bool {
-	caps, ok := p[event.Responsible]
+	syscalls, ok := p[event.Responsible]
 	if !ok {
 		return true
 	}
-	hashes, ok := caps[event.Syscall]
+	hashes, ok := syscalls[event.Syscall]
 	if !ok {
 		return true
 	}
@@ -66,14 +60,14 @@ func (p Policy) Export(targetPID int, outputDir string) error {
 		return nil
 	}
 	var entries []PackageEntry
-	for pkgName, caps := range p {
+	for pkgName, syscalls := range p {
 		e := PackageEntry{Package: pkgName}
-		for sysName, hashes := range caps {
-			ce := SyscallsEntry{Syscall: sysName}
+		for sysName, hashes := range syscalls {
+			se := SyscallsEntry{Syscall: sysName}
 			for h := range hashes {
-				ce.CallPathHashes = append(ce.CallPathHashes, h)
+				se.CallPathHashes = append(se.CallPathHashes, h)
 			}
-			e.Syscalls = append(e.Syscalls, ce)
+			e.Syscalls = append(e.Syscalls, se)
 		}
 		entries = append(entries, e)
 	}
@@ -91,8 +85,8 @@ func (p Policy) Export(targetPID int, outputDir string) error {
 		return fmt.Errorf("writing file: %w", err)
 	}
 	fmt.Printf("📁 Policy saved to: %s\n", path)
-	fmt.Printf("   Packages:    %d\n", len(p))
-	fmt.Printf("   Capabilities: %d unique\n", countUniqueCaps(p))
+	fmt.Printf("   Packages: %d\n", len(p))
+	fmt.Printf("   Syscalls: %d unique\n", countUniqueSyscalls(p))
 	return nil
 }
 
@@ -103,19 +97,19 @@ func (p Policy) PrintSummary() {
 	}
 	fmt.Printf("\n%s\n  POLICY SUMMARY — %d packages\n%s\n",
 		strings.Repeat("═", 60), len(p), strings.Repeat("═", 60))
-	for pkg, caps := range p {
+	for pkg, syscalls := range p {
 		fmt.Printf("\n  📦 %s\n", pkg)
-		for cap, hashes := range caps {
-			fmt.Printf("     %-32s %d path(s)\n", cap, len(hashes))
+		for sys, hashes := range syscalls {
+			fmt.Printf("     %-32s %d path(s)\n", sys, len(hashes))
 		}
 	}
 }
 
-func countUniqueCaps(p Policy) int {
+func countUniqueSyscalls(p Policy) int {
 	seen := make(map[string]bool)
-	for _, caps := range p {
-		for c := range caps {
-			seen[c] = true
+	for _, syscalls := range p {
+		for s := range syscalls {
+			seen[s] = true
 		}
 	}
 	return len(seen)
@@ -125,35 +119,31 @@ func countUniqueCaps(p Policy) int {
 // UnattributedPolicy — process-level safety net
 // -----------------------------------------------------------------------
 
-// UnattributedPolicy records capabilities seen in syscalls that NodeLeash
+// UnattributedPolicy records syscalls seen in events that NodeLeash
 // could not attribute to any package (async completion, worker thread pool).
-//
-// In enforcement: a capability that was NEVER seen unattributed during
-// analysis but appears unattributed during enforcement is a violation —
-// something is using a new capability through an opaque execution path.
 type UnattributedPolicy struct {
-	Capabilities map[string]bool `json:"unattributed_capabilities"`
+	Syscalls map[string]bool `json:"unattributed_syscalls"`
 }
 
 func NewUnattributedPolicy() *UnattributedPolicy {
-	return &UnattributedPolicy{Capabilities: make(map[string]bool)}
+	return &UnattributedPolicy{Syscalls: make(map[string]bool)}
 }
 
-func (u *UnattributedPolicy) Record(capability string) {
-	if capability != CapUnknown {
-		u.Capabilities[capability] = true
+func (u *UnattributedPolicy) Record(syscall string) {
+	if syscall != "" {
+		u.Syscalls[syscall] = true
 	}
 }
 
-func (u *UnattributedPolicy) CheckViolation(capability string) bool {
-	if capability == CapUnknown {
+func (u *UnattributedPolicy) CheckViolation(syscall string) bool {
+	if syscall == "" {
 		return false
 	}
-	return !u.Capabilities[capability]
+	return !u.Syscalls[syscall]
 }
 
 func (u *UnattributedPolicy) Export(targetPID int, outputDir string) error {
-	if len(u.Capabilities) == 0 {
+	if len(u.Syscalls) == 0 {
 		return nil
 	}
 	data, err := json.MarshalIndent(u, "", "  ")
@@ -170,40 +160,40 @@ func (u *UnattributedPolicy) Export(targetPID int, outputDir string) error {
 		return fmt.Errorf("writing file: %w", err)
 	}
 	fmt.Printf("📁 Unattributed policy saved to: %s\n", path)
-	fmt.Printf("   Unattributed capabilities: %d\n", len(u.Capabilities))
+	fmt.Printf("   Unattributed syscalls: %d\n", len(u.Syscalls))
 	return nil
 }
 
 func (u *UnattributedPolicy) PrintSummary() {
-	fmt.Printf("\n%s\n  UNATTRIBUTED CAPABILITIES — safety net\n%s\n",
+	fmt.Printf("\n%s\n  UNATTRIBUTED SYSCALLS — safety net\n%s\n",
 		strings.Repeat("─", 60), strings.Repeat("─", 60))
-	if len(u.Capabilities) == 0 {
+	if len(u.Syscalls) == 0 {
 		fmt.Println("  None — all syscalls were attributed to a package.")
 		return
 	}
 	fmt.Println("  Observed in syscalls whose JS context was not recoverable.")
-	fmt.Println("  In enforcement: any NEW capability here = violation.\n")
-	for cap := range u.Capabilities {
-		fmt.Printf("  • %s\n", cap)
+	fmt.Println("  In enforcement: any NEW syscall here = violation.\n")
+	for sys := range u.Syscalls {
+		fmt.Printf("  • %s\n", sys)
 	}
 }
 
 // -----------------------------------------------------------------------
-// callPathDebugStore — human-readable call paths (--debug only)
+// callPathDebugStore — human-readable call paths
 // -----------------------------------------------------------------------
 
 type callPathDebugStore map[string]map[string]map[string][]string
 
 func (s callPathDebugStore) RecordDebug(event AnalyzedStack) {
-	pkg, cap, hash := event.Responsible, event.Capability, event.CallPathHash
+	pkg, sys, hash := event.Responsible, event.Syscall, event.CallPathHash
 	if s[pkg] == nil {
 		s[pkg] = make(map[string]map[string][]string)
 	}
-	if s[pkg][cap] == nil {
-		s[pkg][cap] = make(map[string][]string)
+	if s[pkg][sys] == nil {
+		s[pkg][sys] = make(map[string][]string)
 	}
-	if _, exists := s[pkg][cap][hash]; !exists {
-		s[pkg][cap][hash] = event.CallPath
+	if _, exists := s[pkg][sys][hash]; !exists {
+		s[pkg][sys][hash] = event.CallPath
 	}
 }
 

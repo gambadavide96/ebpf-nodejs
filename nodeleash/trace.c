@@ -104,9 +104,13 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
 
     //Get the current stack for the process that triggered sys_enter    
     int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
+    if (stack_id < 0)
+        return 0;
 
     // Reserve 20 bytes in ring buffer
     struct ebpf_syscall_info *info = bpf_ringbuf_reserve(&ring_buffer, sizeof(*info), 0);
+    if (!info)
+        return 0;
 
     info->timestamp_ns = bpf_ktime_get_ns();
     info->pid          = pid;

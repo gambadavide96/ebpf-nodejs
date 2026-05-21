@@ -10,12 +10,11 @@ import (
 
 // Violation represents a single detected policy breach.
 type Violation struct {
-	Time       time.Time
-	Pid        uint32
-	Syscall    string
-	Capability string
-	Package    string   // "[unattributed]" when the event had no attribution
-	CallPath   []string // empty for unattributed violations
+	Time     time.Time
+	Pid      uint32
+	Syscall  string
+	Package  string   // "[unattributed]" when the event had no attribution
+	CallPath []string // empty for unattributed violations
 }
 
 func (v Violation) String() string {
@@ -24,17 +23,13 @@ func (v Violation) String() string {
 		path = "<unattributed>"
 	}
 	return fmt.Sprintf(
-		"[%s] 🚨 VIOLATION  pid=%-6d  cap=%-28s  pkg=%s  path=%s",
+		"[%s] 🚨 VIOLATION  pid=%-6d  syscall=%-28s  pkg=%s  path=%s",
 		v.Time.Format("15:04:05.000000"),
-		v.Pid, v.Capability, v.Package, path,
+		v.Pid, v.Syscall, v.Package, path,
 	)
 }
 
 // EnforcementEngine holds the loaded policy and logs violations to terminal.
-//
-// In this implementation the enforcement action is always logging: when a
-// violation is detected the engine prints a warning to stdout and records it
-// internally for the end-of-session summary. The application is not terminated.
 type EnforcementEngine struct {
 	policy             Policy
 	unattributedPolicy *UnattributedPolicy
@@ -43,9 +38,6 @@ type EnforcementEngine struct {
 
 // LoadEnforcementEngine reads the two policy JSON files produced by analysis
 // mode and constructs an engine ready for enforcement.
-//
-// policyPath:       nodeleash_policy_pid<N>_<ts>.json
-// unattributedPath: nodeleash_unattributed_pid<N>_<ts>.json
 func LoadEnforcementEngine(policyPath, unattributedPath string) (*EnforcementEngine, error) {
 	p, err := loadPolicy(policyPath)
 	if err != nil {
@@ -58,7 +50,7 @@ func LoadEnforcementEngine(policyPath, unattributedPath string) (*EnforcementEng
 	}
 
 	fmt.Printf("📋 Policy loaded: %d packages\n", len(p))
-	fmt.Printf("📋 Unattributed capabilities: %d\n", len(u.Capabilities))
+	fmt.Printf("📋 Unattributed syscalls: %d\n", len(u.Syscalls))
 
 	return &EnforcementEngine{
 		policy:             p,
@@ -67,56 +59,38 @@ func LoadEnforcementEngine(policyPath, unattributedPath string) (*EnforcementEng
 }
 
 // Check evaluates a single eBPF event against the loaded policy.
-//
-// Two checks run in parallel:
-//
-//  1. Attributed check (per-package policy):
-//     If the event was attributed to a specific package, verify that
-//     (package, capability, call_path_hash) all appear in the approved policy.
-//     This is the primary enforcement layer.
-//
-//  2. Unattributed check (safety net):
-//     If attribution failed (async path, worker thread pool), verify that
-//     this capability was seen unattributed during analysis. A capability
-//     that was never part of the legitimate "async noise floor" but suddenly
-//     appears unattributed in enforcement is a strong anomaly signal.
 func (e *EnforcementEngine) Check(event AnalyzedStack, pid uint32, syscallName string) {
 	if event.Responsible != "" {
 		// Primary check: attributed event.
 		if e.policy.CheckViolation(event) {
 			e.logViolation(Violation{
-				Time:       time.Now(),
-				Pid:        pid,
-				Syscall:    syscallName,
-				Capability: event.Capability,
-				Package:    event.Responsible,
-				CallPath:   event.CallPath,
+				Time:     time.Now(),
+				Pid:      pid,
+				Syscall:  syscallName,
+				Package:  event.Responsible,
+				CallPath: event.CallPath,
 			})
 		}
 		return
 	}
 
 	// Safety net check: unattributed event.
-	if event.Capability != "" && e.unattributedPolicy.CheckViolation(event.Capability) {
+	if event.Syscall != "" && e.unattributedPolicy.CheckViolation(event.Syscall) {
 		e.logViolation(Violation{
-			Time:       time.Now(),
-			Pid:        pid,
-			Syscall:    syscallName,
-			Capability: event.Capability,
-			Package:    "[unattributed]",
+			Time:    time.Now(),
+			Pid:     pid,
+			Syscall: syscallName,
+			Package: "[unattributed]",
 		})
 	}
 }
 
-// logViolation prints the violation to stdout and appends it to the internal
-// list for the end-of-session summary.
 func (e *EnforcementEngine) logViolation(v Violation) {
 	fmt.Println(v.String())
 	e.violations = append(e.violations, v)
 }
 
-// PrintViolationSummary prints a grouped summary of all violations detected
-// during the enforcement session. Called at shutdown.
+// PrintViolationSummary prints a grouped summary of all violations.
 func (e *EnforcementEngine) PrintViolationSummary() {
 	fmt.Printf("\n%s\n  ENFORCEMENT SUMMARY\n%s\n",
 		strings.Repeat("═", 60), strings.Repeat("═", 60))
@@ -129,18 +103,18 @@ func (e *EnforcementEngine) PrintViolationSummary() {
 	fmt.Printf("  🚨 %d violation(s) detected\n\n", len(e.violations))
 
 	// Group by package for readability.
-	byPkg := make(map[string]map[string]int) // pkg → cap → count
+	byPkg := make(map[string]map[string]int) // pkg → syscall → count
 	for _, v := range e.violations {
 		if byPkg[v.Package] == nil {
 			byPkg[v.Package] = make(map[string]int)
 		}
-		byPkg[v.Package][v.Capability]++
+		byPkg[v.Package][v.Syscall]++
 	}
 
-	for pkg, caps := range byPkg {
+	for pkg, syscalls := range byPkg {
 		fmt.Printf("  📦 %s\n", pkg)
-		for cap, count := range caps {
-			fmt.Printf("     %-32s ×%d\n", cap, count)
+		for sys, count := range syscalls {
+			fmt.Printf("     %-32s ×%d\n", sys, count)
 		}
 	}
 }
@@ -149,8 +123,6 @@ func (e *EnforcementEngine) PrintViolationSummary() {
 // JSON deserialization
 // -----------------------------------------------------------------------
 
-// loadPolicy reads the JSON written by Policy.Export() and reconstructs
-// the in-memory Policy map.
 func loadPolicy(path string) (Policy, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -162,22 +134,21 @@ func loadPolicy(path string) (Policy, error) {
 	}
 	p := NewPolicy()
 	for _, entry := range entries {
-		for _, ce := range entry.Capabilities {
+		for _, se := range entry.Syscalls {
 			if p[entry.Package] == nil {
 				p[entry.Package] = make(map[string]map[string]bool)
 			}
-			if p[entry.Package][ce.Capability] == nil {
-				p[entry.Package][ce.Capability] = make(map[string]bool)
+			if p[entry.Package][se.Syscall] == nil {
+				p[entry.Package][se.Syscall] = make(map[string]bool)
 			}
-			for _, h := range ce.CallPathHashes {
-				p[entry.Package][ce.Capability][h] = true
+			for _, h := range se.CallPathHashes {
+				p[entry.Package][se.Syscall][h] = true
 			}
 		}
 	}
 	return p, nil
 }
 
-// loadUnattributedPolicy reads the JSON written by UnattributedPolicy.Export().
 func loadUnattributedPolicy(path string) (*UnattributedPolicy, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
