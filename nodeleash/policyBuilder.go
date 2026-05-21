@@ -24,19 +24,19 @@ import (
 type Policy map[string]map[string]map[string]bool
 
 type PackageEntry struct {
-	Package      string            `json:"package"`
-	Capabilities []CapabilityEntry `json:"capabilities"`
+	Package  string          `json:"package"`
+	Syscalls []SyscallsEntry `json:"syscalls"`
 }
 
-type CapabilityEntry struct {
-	Capability     string   `json:"capability"`
+type SyscallsEntry struct {
+	Syscall        string   `json:"syscalls"`
 	CallPathHashes []string `json:"call_path_hashes"`
 }
 
 func NewPolicy() Policy { return make(Policy) }
 
 func (p Policy) Record(event AnalyzedStack) {
-	pkg, cap, hash := event.Responsible, event.Capability, event.CallPathHash
+	pkg, cap, hash := event.Responsible, event.Syscall, event.CallPathHash
 	if p[pkg] == nil {
 		p[pkg] = make(map[string]map[string]bool)
 	}
@@ -53,7 +53,7 @@ func (p Policy) CheckViolation(event AnalyzedStack) bool {
 	if !ok {
 		return true
 	}
-	hashes, ok := caps[event.Capability]
+	hashes, ok := caps[event.Syscall]
 	if !ok {
 		return true
 	}
@@ -68,12 +68,12 @@ func (p Policy) Export(targetPID int, outputDir string) error {
 	var entries []PackageEntry
 	for pkgName, caps := range p {
 		e := PackageEntry{Package: pkgName}
-		for capName, hashes := range caps {
-			ce := CapabilityEntry{Capability: capName}
+		for sysName, hashes := range caps {
+			ce := SyscallsEntry{Syscall: sysName}
 			for h := range hashes {
 				ce.CallPathHashes = append(ce.CallPathHashes, h)
 			}
-			e.Capabilities = append(e.Capabilities, ce)
+			e.Syscalls = append(e.Syscalls, ce)
 		}
 		entries = append(entries, e)
 	}

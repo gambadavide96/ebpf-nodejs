@@ -25,15 +25,6 @@ struct {
     __uint(max_entries, 10240);
 } target_pid_map SEC(".maps");
 
-// Kernel-side syscall allowlist. Populated at startup from syscallToCapability.
-// Drops futex, epoll_wait, clock_gettime and all other infrastructure syscalls
-// before they reach the ring buffer 
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, __u32);   // syscall ID
-    __type(value, __u8);  // always 1 (set semantics)
-    __uint(max_entries, 512);
-} tracked_syscalls_map SEC(".maps");
 
 // User-space stack traces.
 // 8192 entries handles real-world Node.js workloads without drops.
@@ -50,17 +41,6 @@ struct {
     __uint(max_entries, 4 * 1024 * 1024);
 } ring_buffer SEC(".maps");
 
-// Drop counters for diagnosing silent data loss.
-// Index 0: stack_map full. Index 1: ring_buffer full.
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, __u64);
-    __uint(max_entries, 2);
-} drop_counters SEC(".maps");
-
-#define DROP_STACK_FULL   0
-#define DROP_RINGBUF_FULL 1
 
 // ============================================================================
 // TRACEPOINT ARGUMENT STRUCTURES
@@ -97,7 +77,7 @@ int trace_fork(struct trace_event_raw_sched_process_fork *ctx) {
 // Removes a PROCESS (not a thread) from tracking on exit.
 // For Node.js threads (libuv pool, V8 workers), TGID == main process PID —
 // so every thread exit would delete the main process from the map,
-// silently stopping all monitoring. Fix: only delete when tid == pid (thread-group leader).
+// silently stopping all monitoring. Only delete when tid == pid (thread-group leader).
 SEC("tracepoint/sched/sched_process_exit")
 int trace_exit(void *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -112,7 +92,6 @@ int trace_exit(void *ctx) {
 }
 
 // Captures syscall events for tracked processes.
-// Two-stage filter: (1) PID tracked? (2) syscall relevant?
 SEC("tracepoint/raw_syscalls/sys_enter")
 int trace_sys_enter(struct sys_enter_args *ctx) {
     u64 pid_tgid   = bpf_get_current_pid_tgid();
@@ -123,28 +102,11 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
     if (!bpf_map_lookup_elem(&target_pid_map, &pid))
         return 0;
 
-    // If the syscall isn't in syscallToCapability, we ignore it
-    if (!bpf_map_lookup_elem(&tracked_syscalls_map, &syscall_id))
-        return 0;
-
+    //Get the current stack for the process that triggered sys_enter    
     int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
-    // If the stack map is full, notify via drop_counters
-    if (stack_id < 0) {
-        u32 key = DROP_STACK_FULL;
-        u64 *cnt = bpf_map_lookup_elem(&drop_counters, &key);
-        if (cnt) __sync_fetch_and_add(cnt, 1); // Atomic increment of the counter
-        return 0;
-    }
 
     // Reserve 20 bytes in ring buffer
     struct ebpf_syscall_info *info = bpf_ringbuf_reserve(&ring_buffer, sizeof(*info), 0);
-    // If the ring buffer is full, notify via drop_counters
-    if (!info) {
-        u32 k = DROP_RINGBUF_FULL;
-        u64 *cnt = bpf_map_lookup_elem(&drop_counters, &k);
-        if (cnt) __sync_fetch_and_add(cnt, 1); // Atomic increment of the counter
-        return 0;
-    }
 
     info->timestamp_ns = bpf_ktime_get_ns();
     info->pid          = pid;

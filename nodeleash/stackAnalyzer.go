@@ -10,10 +10,10 @@ import (
 
 // AnalyzedStack is the unit of information produced per eBPF event.
 // Returned by AnalyzeStack for both attributed and unattributed events.
-// When ok=false, only Capability is populated — callers use it for
+// When ok=false, only Syscall is populated — callers use it for
 // the UnattributedPolicy safety net.
 type AnalyzedStack struct {
-	Capability   string
+	Syscall      string
 	Responsible  string   // package that triggered the syscall ("" if unattributed)
 	CallPath     []string // [outermost_caller, ..., Responsible]
 	CallPathHash string
@@ -198,22 +198,17 @@ func buildCallPath(frames []ResolvedFrame) (responsible string, callPath []strin
 // Asynchronous I/O (deferred by libuv or the worker thread pool) produces
 // stacks with no user-land JS frames and ends up in UnattributedPolicy.
 func AnalyzeStack(syscallName string, frames []ResolvedFrame) (AnalyzedStack, bool) {
-	//Assigning capability
-	cap := MapToCapability(syscallName)
-	if cap == CapUnknown {
-		return AnalyzedStack{}, false
-	}
 
 	responsible, callPath, found := buildCallPath(frames)
 
 	//If we haven't found the responsible
-	//we pass the capability to assign it in unattributed fallback
+	//we pass the syscall to assign it in unattributed fallback
 	if !found {
-		return AnalyzedStack{Capability: cap}, false
+		return AnalyzedStack{Syscall: syscallName}, false
 	}
 
 	return AnalyzedStack{
-		Capability:   cap,
+		Syscall:      syscallName,
 		Responsible:  responsible,
 		CallPath:     callPath,
 		CallPathHash: hashCallPath(callPath),

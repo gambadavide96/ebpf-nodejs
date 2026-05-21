@@ -40,42 +40,11 @@ func getSyscallName(id uint32) string {
 	return name
 }
 
-// populateTrackedSyscalls fills the kernel-side tracked_syscalls_map from
-// the capability taxonomy. Only these syscall IDs reach the ring buffer.
-func populateTrackedSyscalls(objs traceObjects) error {
-	val := uint8(1)
-	for name := range syscallToCapability {
-		id, err := seccomp.GetSyscallFromName(name)
-		if err != nil {
-			continue
-		}
-		key := uint32(id)
-		if err := objs.TrackedSyscallsMap.Put(&key, &val); err != nil {
-			return fmt.Errorf("inserting syscall %s (id %d): %w", name, key, err)
-		}
-	}
-	return nil
-}
-
-// checkDropCounters warns if events were silently lost during the session.
-func checkDropCounters(objs traceObjects) {
-	var stackDrops, ringDrops uint64
-	k0, k1 := uint32(0), uint32(1)
-	objs.DropCounters.Lookup(&k0, &stackDrops)
-	objs.DropCounters.Lookup(&k1, &ringDrops)
-	if stackDrops > 0 || ringDrops > 0 {
-		fmt.Printf("\n⚠️  Data loss during session:\n")
-		fmt.Printf("   Stack map full:   %d events dropped\n", stackDrops)
-		fmt.Printf("   Ring buffer full: %d events dropped\n", ringDrops)
-		fmt.Printf("   Consider increasing max_entries in trace.c\n")
-	}
-}
-
 // =========================================================================
 // CLI
 //
 // Analyze mode — build a policy from a live Node.js process:
-//   sudo ./nodeleash analyze <PID> [--debug]
+//   sudo ./nodeleash analyze <PID>
 //
 // Enforce mode — monitor against an existing policy and log violations:
 //   sudo ./nodeleash enforce <PID> \
@@ -92,9 +61,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `NodeLeash — npm package-level syscall policy enforcement
 
 ANALYZE MODE  (build policy from a running Node.js process):
-  sudo ./nodeleash analyze <PID> [--debug]
-
-  --debug   print resolved stacks and save full call paths to JSON
+  sudo ./nodeleash analyze <PID> 
 
 ENFORCE MODE  (log policy violations from a running Node.js process):
   sudo ./nodeleash enforce <PID> \
@@ -126,9 +93,6 @@ func main() {
 	args := os.Args[3:]
 
 	var (
-		// analyze flags
-		debugMode bool
-
 		// enforce flags
 		policyPath       string
 		unattributedPath string
@@ -136,11 +100,7 @@ func main() {
 
 	switch mode {
 	case "analyze":
-		for _, a := range args {
-			if a == "--debug" {
-				debugMode = true
-			}
-		}
+		//No flag to parse
 	case "enforce":
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
@@ -186,12 +146,6 @@ func main() {
 		log.Fatalf("Inserting PID: %v", err)
 	}
 
-	// Populate kernel-side syscall filter from the capability taxonomy.
-	// Infrastructure syscalls (futex, epoll_wait...) are dropped in the kernel.
-	if err := populateTrackedSyscalls(objs); err != nil {
-		log.Fatalf("Populating syscall filter: %v", err)
-	}
-
 	tpSysEnter, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
 	if err != nil {
 		log.Fatalf("sys_enter: %v", err)
@@ -217,7 +171,6 @@ func main() {
 		// Analyze mode
 		policy             Policy
 		unattributedPolicy *UnattributedPolicy
-		debugStore         callPathDebugStore
 		rawTracker         map[string]map[string][]string
 
 		// Enforce mode
@@ -228,12 +181,8 @@ func main() {
 	case "analyze":
 		policy = NewPolicy()
 		unattributedPolicy = NewUnattributedPolicy()
-		debugStore = make(callPathDebugStore)
 		rawTracker = make(map[string]map[string][]string)
 		fmt.Printf("🔍 NodeLeash [ANALYZE] — PID: %d\n", targetPID)
-		if debugMode {
-			fmt.Println("   [--debug: stacks printed, call paths saved to JSON]")
-		}
 
 	case "enforce":
 		engine, err = LoadEnforcementEngine(policyPath, unattributedPath)
@@ -342,32 +291,26 @@ func main() {
 		case "analyze":
 			if ok {
 				policy.Record(event)
-			} else if event.Capability != "" {
-				// Unattributed but capability known: feed the safety net.
-				unattributedPolicy.Record(event.Capability)
+			} else if event.Syscall != "" {
+				// Unattributed but Syscall known: feed the safety net.
+				unattributedPolicy.Record(event.Syscall)
 			}
 
-			if debugMode {
-				eventTime := bootTime.Add(time.Duration(info.TimestampNs))
+			eventTime := bootTime.Add(time.Duration(info.TimestampNs))
 
-				if ok {
-					// Attributed event
-					fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s\n",
-						eventTime.Format("15:04:05.000000"),
-						info.Pid, event.Capability, event.Responsible)
-					fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
-					debugStore.RecordDebug(event)
-				} else if event.Capability != "" {
-					// Unattributed event but with known capability
-					fmt.Printf("\n🕒 [%s] [PID:%d] %s → [unattributed]\n",
-						eventTime.Format("15:04:05.000000"),
-						info.Pid, event.Capability)
-				}
+			if ok {
+				fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s\n",
+					eventTime.Format("15:04:05.000000"),
+					info.Pid, event.Syscall, event.Responsible)
+				fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
+			} else if event.Syscall != "" {
+				fmt.Printf("\n🕒 [%s] [PID:%d] %s → [unattributed]\n",
+					eventTime.Format("15:04:05.000000"),
+					info.Pid, event.Syscall)
+			}
 
-				// Stack resolved — printed in both cases
-				for i, f := range resolvedFrames {
-					fmt.Printf("      [%2d] %s\n", i, f.Display())
-				}
+			for i, f := range resolvedFrames {
+				fmt.Printf("      [%2d] %s\n", i, f.Display())
 			}
 
 		case "enforce":
@@ -381,7 +324,6 @@ func main() {
 	// =========================================================================
 	// SHUTDOWN & EXPORT
 	// =========================================================================
-	checkDropCounters(objs)
 
 	switch mode {
 	case "analyze":
@@ -395,9 +337,6 @@ func main() {
 		}
 		if err := unattributedPolicy.Export(int(targetPID), "policy"); err != nil {
 			log.Printf("Unattributed policy export error: %v", err)
-		}
-		if debugMode {
-			debugStore.ExportDebug(int(targetPID), "policy")
 		}
 
 	case "enforce":
