@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,44 +175,4 @@ func (u *UnattributedPolicy) PrintSummary() {
 	for sys := range u.Syscalls {
 		fmt.Printf("  • %s\n", sys)
 	}
-}
-
-// -----------------------------------------------------------------------
-// callPathDebugStore — human-readable call paths
-// -----------------------------------------------------------------------
-
-type callPathDebugStore map[string]map[string]map[string][]string
-
-func (s callPathDebugStore) RecordDebug(event AnalyzedStack) {
-	pkg, sys, hash := event.Responsible, event.Syscall, event.CallPathHash
-	if s[pkg] == nil {
-		s[pkg] = make(map[string]map[string][]string)
-	}
-	if s[pkg][sys] == nil {
-		s[pkg][sys] = make(map[string][]string)
-	}
-	if _, exists := s[pkg][sys][hash]; !exists {
-		s[pkg][sys][hash] = event.CallPath
-	}
-}
-
-func (s callPathDebugStore) ExportDebug(targetPID int, outputDir string) {
-	if len(s) == 0 {
-		return
-	}
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		log.Printf("⚠️  debug JSON error: %v", err)
-		return
-	}
-	if err := os.MkdirAll(outputDir, 0777); err != nil {
-		return
-	}
-	path := filepath.Join(outputDir,
-		fmt.Sprintf("nodeleash_callpaths_pid%d.json", targetPID))
-	if err := os.WriteFile(path, data, 0666); err != nil {
-		log.Printf("⚠️  debug write error: %v", err)
-		return
-	}
-	fmt.Printf("🔍 Debug call paths saved to: %s\n", path)
 }

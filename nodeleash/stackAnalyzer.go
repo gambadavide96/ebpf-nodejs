@@ -88,7 +88,6 @@ func classifyJSFrame(raw string) classifiedFrame {
 		if path == "unknown" {
 			return classifiedFrame{Kind: KindInfrastructure}
 		}
-		funcName = "<anon@" + anonLabel(path) + ">"
 	}
 
 	pkgName := extractJSPackageName(path)
@@ -190,8 +189,8 @@ func buildCallPath(frames []ResolvedFrame) (responsible string, callPath []strin
 // AnalyzeStack processes a single eBPF event.
 //
 // Returns (event, true) when attribution succeeds.
-// Returns (AnalyzedStack{Capability: cap}, false) when attribution fails
-// but the capability is known — callers record it in UnattributedPolicy.
+// Returns (AnalyzedStack{Syscall: syscallName}, false) when attribution fails.
+// Callers record the syscall name in UnattributedPolicy.
 //
 // Attribution works for syscalls executed synchronously or quasi-synchronously,
 // i.e. while the JS frame is still physically present on the native stack.

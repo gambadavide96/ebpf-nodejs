@@ -279,7 +279,8 @@ func main() {
 
 		// Step 5: classify frames, build call path, map syscall → capability.
 		// Returns (event, true) for attributed events.
-		// Returns (AnalyzedStack{Capability: cap}, false) for unattributed.
+		// Returns (AnalyzedStack{Syscall: syscallName}, false) when attribution fails.
+		// Callers record the syscall name in UnattributedPolicy. for unattributed.
 		// Attribution works only when the JS frame is present on the native
 		// stack at the moment of the syscall (synchronous/quasi-synchronous
 		// execution). Deferred async I/O via libuv or the worker thread pool
