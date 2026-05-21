@@ -25,7 +25,6 @@ struct {
     __uint(max_entries, 10240);
 } target_pid_map SEC(".maps");
 
-
 // User-space stack traces.
 // 8192 entries handles real-world Node.js workloads without drops.
 struct {
@@ -41,6 +40,17 @@ struct {
     __uint(max_entries, 4 * 1024 * 1024);
 } ring_buffer SEC(".maps");
 
+// Infrastructure syscall blocklist.
+// Populated at startup from noiseSyscalls.go.
+// Syscalls present in this map are dropped before reaching the ring buffer —
+// they are pure Node.js/OS infrastructure with no attribution value:
+// mutex ops (futex), event loop waits (epoll_wait, poll), scheduling (yield).
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);   // syscall ID
+    __type(value, __u8);  // always 1 (set semantics)
+    __uint(max_entries, 256);
+} noise_syscalls_map SEC(".maps");
 
 // ============================================================================
 // TRACEPOINT ARGUMENT STRUCTURES
@@ -100,6 +110,12 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
 
     // If the pid isn't in the map, we ignore it
     if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+     // Drop infrastructure/noise syscalls before capturing the stack.
+    // This avoids wasting stack_map entries and ring buffer space on
+    // futex, epoll_wait, poll and other syscalls with no attribution value.
+    if (bpf_map_lookup_elem(&noise_syscalls_map, &syscall_id))
         return 0;
 
     //Get the current stack for the process that triggered sys_enter    

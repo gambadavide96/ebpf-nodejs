@@ -2,10 +2,6 @@
 # 1. Compiled Executables
 # ---------------------------------------------------
 # Ignore the main compiled binary of the tool
-node-ebpf
-trace-node
-analysis-mode
-nodeleash
 
 # ---------------------------------------------------
 # 2. ebpf-go (bpf2go) Generated Files
