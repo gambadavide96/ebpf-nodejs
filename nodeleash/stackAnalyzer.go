@@ -138,16 +138,6 @@ func extractJSPackageName(rawPath string) string {
 	return fmt.Sprintf("LOCAL/%s/%s", parentDir, fileName)
 }
 
-func anonLabel(path string) string {
-	clean := strings.TrimPrefix(path, "file://")
-	parts := strings.Split(clean, ":")
-	base := filepath.Base(parts[0])
-	if len(parts) > 1 {
-		return base + ":" + parts[1]
-	}
-	return base
-}
-
 // -----------------------------------------------------------------------
 // Call path construction
 // -----------------------------------------------------------------------
