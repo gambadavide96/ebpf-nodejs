@@ -20,6 +20,9 @@ var noiseSyscalls = []string{
 	// -------------------------------------------------------------------------
 	"futex",        // mutex/condvar — called millions of times per second
 	"futex_time64", // 32-bit time variant of futex (some kernels)
+	"epoll_ctl",
+	"io_uring_enter",
+	"ioctl",
 
 	// -------------------------------------------------------------------------
 	// Event loop waiting — epoll/poll/select are the heart of libuv's I/O loop.
@@ -53,6 +56,14 @@ var noiseSyscalls = []string{
 	// -------------------------------------------------------------------------
 	"clock_gettime",
 	"gettimeofday",
+
+	// -------------------------------------------------------------------------
+	// Memory Management - Node.js internal memory management
+	// -------------------------------------------------------------------------
+	"brk",
+	"mmap",
+	"mprotect",
+	"munmap",
 
 	// -------------------------------------------------------------------------
 	// NodeLeash noise

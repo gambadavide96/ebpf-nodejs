@@ -245,7 +245,7 @@ int uprobe_uv_getaddrinfo(struct pt_regs *ctx) {
     // key: req + offset = &req->work_req
     // so in uv__getaddrinfo_done(uv__work_t* w) the lookup is correct
 
-    u64 req_ptr  = ctx->si; //2nd parameter
+    u64 req_ptr  = PT_REGS_PARM2(ctx);  // RSI = uv_getaddrinfo_t* req
     u64 work_key = req_ptr + OFFSET_GETADDRINFO_WORK_REQ;
 
     int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
@@ -269,7 +269,7 @@ int uprobe_uv_getaddrinfo_done(struct pt_regs *ctx) {
     // uv__getaddrinfo_done(struct uv__work *w, int status)
     // arg1 = RDI = uv__work_t* w  (= &req->work_req, stessa chiave usata sopra)
 
-    u64 work_ptr = ctx->di; //1st parameter
+    u64 work_ptr = PT_REGS_PARM1(ctx);  // RDI = uv__work_t* w
     u32 *sid = bpf_map_lookup_elem(&getaddrinfo_map, &work_ptr);
     if (sid)
         bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
