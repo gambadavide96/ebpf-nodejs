@@ -208,7 +208,7 @@ func main() {
 	}
 
 	//
-	//							- 1 - Filesystem
+	//							 1 - Filesystem
 	//
 	upWorkSubmit, err := ex.Uprobe("uv__work_submit", objs.UprobeUvWorkSubmit, nil)
 	if err != nil {
@@ -232,7 +232,7 @@ func main() {
 	}
 
 	//
-	//						- 2 - DNS resolution + TCP connect
+	//						2a - DNS resolution + TCP connect
 	//
 
 	upGetaddrinfo, err := ex.Uprobe("uv_getaddrinfo", objs.UprobeUvGetaddrinfo, nil)
@@ -254,6 +254,48 @@ func main() {
 		log.Printf("⚠️  uretprobe uv__getaddrinfo_done: %v", err)
 	} else {
 		defer urGetaddrinfoDone.Close()
+	}
+
+	//
+	//						2b - Direct TCP connect with IP (without DNS)
+	//
+	upTcpConnect, err := ex.Uprobe("uv_tcp_connect", objs.UprobeUvTcpConnect, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv_tcp_connect: %v", err)
+	} else {
+		defer upTcpConnect.Close()
+	}
+
+	urTcpConnect, err := ex.Uretprobe("uv_tcp_connect", objs.UretprobeUvTcpConnect, nil)
+	if err != nil {
+		log.Printf("⚠️  uretprobe uv_tcp_connect: %v", err)
+	} else {
+		defer urTcpConnect.Close()
+	}
+
+	//
+	//						3 - Stream write (TCP/pipe)
+	//
+
+	upWrite, err := ex.Uprobe("uv_write", objs.UprobeUvWrite, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv_write: %v", err)
+	} else {
+		defer upWrite.Close()
+	}
+
+	upWriteInternal, err := ex.Uprobe("uv__write", objs.UprobeUvWriteInternal, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv__write: %v", err)
+	} else {
+		defer upWriteInternal.Close()
+	}
+
+	urWriteInternal, err := ex.Uretprobe("uv__write", objs.UretprobeUvWriteInternal, nil)
+	if err != nil {
+		log.Printf("⚠️  uretprobe uv__write: %v", err)
+	} else {
+		defer urWriteInternal.Close()
 	}
 
 	// -------------------------------------------------------------------------
