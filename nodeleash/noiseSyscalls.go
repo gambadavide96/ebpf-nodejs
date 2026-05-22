@@ -53,6 +53,11 @@ var noiseSyscalls = []string{
 	// -------------------------------------------------------------------------
 	"clock_gettime",
 	"gettimeofday",
+
+	// -------------------------------------------------------------------------
+	// NodeLeash noise
+	// -------------------------------------------------------------------------
+	"uretprobe",
 }
 
 // populateNoiseSyscalls fills the kernel-side noise_syscalls_map from the
@@ -61,6 +66,11 @@ var noiseSyscalls = []string{
 // stack, saving stack_map entries and ring buffer space.
 func populateNoiseSyscalls(objs traceObjects) error {
 	val := uint8(1)
+
+	key := uint32(335) // sys_uretprobe — kernel uretprobe mechanism, fired by NodeLeash itself
+	if err := objs.NoiseSyscallsMap.Put(&key, &val); err != nil {
+		return fmt.Errorf("inserting hardcoded noise syscall sys_uretprobe (335): %w", err)
+	}
 	for _, name := range noiseSyscalls {
 		id, err := seccomp.GetSyscallFromName(name)
 		if err != nil {
