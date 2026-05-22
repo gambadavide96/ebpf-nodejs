@@ -136,13 +136,13 @@ func loadPolicy(path string) (Policy, error) {
 	for _, entry := range entries {
 		for _, se := range entry.Syscalls {
 			if p[entry.Package] == nil {
-				p[entry.Package] = make(map[string]map[string]bool)
+				p[entry.Package] = make(map[string]map[string][]string)
 			}
 			if p[entry.Package][se.Syscall] == nil {
-				p[entry.Package][se.Syscall] = make(map[string]bool)
+				p[entry.Package][se.Syscall] = make(map[string][]string)
 			}
-			for _, h := range se.CallPathHashes {
-				p[entry.Package][se.Syscall][h] = true
+			for _, cp := range se.CallPaths {
+				p[entry.Package][se.Syscall][cp.Hash] = cp.CallPath
 			}
 		}
 	}

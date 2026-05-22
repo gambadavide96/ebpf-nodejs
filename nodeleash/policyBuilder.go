@@ -13,8 +13,8 @@ import (
 // Policy — per-package attributed enforcement
 // -----------------------------------------------------------------------
 
-// Policy: Package → Syscall → CallPathHash.
-type Policy map[string]map[string]map[string]bool
+// Policy: Package → Syscall → Hash → callPath
+type Policy map[string]map[string]map[string][]string
 
 type PackageEntry struct {
 	Package  string          `json:"package"`
@@ -22,8 +22,13 @@ type PackageEntry struct {
 }
 
 type SyscallsEntry struct {
-	Syscall        string   `json:"syscall"`
-	CallPathHashes []string `json:"call_path_hashes"`
+	Syscall   string          `json:"syscall"`
+	CallPaths []CallPathEntry `json:"call_paths"`
+}
+
+type CallPathEntry struct {
+	Hash     string   `json:"hash"`
+	CallPath []string `json:"call_path"`
 }
 
 func NewPolicy() Policy { return make(Policy) }
@@ -31,12 +36,12 @@ func NewPolicy() Policy { return make(Policy) }
 func (p Policy) Record(event AnalyzedStack) {
 	pkg, sys, hash := event.Responsible, event.Syscall, event.CallPathHash
 	if p[pkg] == nil {
-		p[pkg] = make(map[string]map[string]bool)
+		p[pkg] = make(map[string]map[string][]string)
 	}
 	if p[pkg][sys] == nil {
-		p[pkg][sys] = make(map[string]bool)
+		p[pkg][sys] = make(map[string][]string)
 	}
-	p[pkg][sys][hash] = true
+	p[pkg][sys][hash] = event.CallPath
 }
 
 // CheckViolation returns true if the event violates the policy.
@@ -50,7 +55,8 @@ func (p Policy) CheckViolation(event AnalyzedStack) bool {
 	if !ok {
 		return true
 	}
-	return !hashes[event.CallPathHash]
+	_, exists := hashes[event.CallPathHash]
+	return !exists
 }
 
 func (p Policy) Export(targetPID int, outputDir string) error {
@@ -63,8 +69,11 @@ func (p Policy) Export(targetPID int, outputDir string) error {
 		e := PackageEntry{Package: pkgName}
 		for sysName, hashes := range syscalls {
 			se := SyscallsEntry{Syscall: sysName}
-			for h := range hashes {
-				se.CallPathHashes = append(se.CallPathHashes, h)
+			for h, cp := range hashes {
+				se.CallPaths = append(se.CallPaths, CallPathEntry{
+					Hash:     h,
+					CallPath: cp,
+				})
 			}
 			e.Syscalls = append(e.Syscalls, se)
 		}

@@ -54,12 +54,28 @@ struct {
     __uint(max_entries, 256);
 } noise_syscalls_map SEC(".maps");
 
+//Category 1 — Filesystem
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, __u64);   // uv__work_t*
     __type(value, __u32); // stack_id
     __uint(max_entries, 4096);
 } work_ptr_map SEC(".maps");
+
+// Category 2 — DNS + TCP connect
+// Key: &uv_getaddrinfo_t.work_req  (= arg1 di uv__getaddrinfo_done)
+// OFFSET_GETADDRINFO_WORK_REQ:
+// gdb $(which node) -batch -ex "p (long)&((uv_getaddrinfo_t*)0)->work_req" -ex quit
+#ifndef OFFSET_GETADDRINFO_WORK_REQ
+#define OFFSET_GETADDRINFO_WORK_REQ 72
+#endif
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u64);
+    __type(value, __u32);
+    __uint(max_entries, 512);
+} getaddrinfo_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -165,7 +181,9 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
 // UPROBES
 // ============================================================================
 
-//1 - Filesystem
+// ============================================================================
+// CATEGORY 1 — Filesystem
+// ============================================================================
 
 SEC("uprobe/uv__work_submit")
 int uprobe_uv_work_submit(struct pt_regs *ctx) {
@@ -205,6 +223,61 @@ int uprobe_uv_fs_work(struct pt_regs *ctx) {
 
 SEC("uretprobe/uv__fs_work")
 int uretprobe_uv_fs_work(struct pt_regs *ctx) {
+    u32 tid = (__u32)bpf_get_current_pid_tgid();
+    bpf_map_delete_elem(&tid_async_stack_map, &tid);
+    return 0;
+}
+
+// ============================================================================
+// CATEGORY 2 — DNS resolution + TCP connect
+// ============================================================================
+
+SEC("uprobe/uv_getaddrinfo")
+int uprobe_uv_getaddrinfo(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+    // uv_getaddrinfo(uv_loop_t *loop, uv_getaddrinfo_t *req, ...)
+    // arg2 = RSI = uv_getaddrinfo_t* req
+    // key: req + offset = &req->work_req
+    // so in uv__getaddrinfo_done(uv__work_t* w) the lookup is correct
+
+    u64 req_ptr  = ctx->si; //2nd parameter
+    u64 work_key = req_ptr + OFFSET_GETADDRINFO_WORK_REQ;
+
+    int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
+    if (stack_id < 0)
+        return 0;
+
+    u32 sid = (u32)stack_id;
+    bpf_map_update_elem(&getaddrinfo_map, &work_key, &sid, BPF_ANY);
+    return 0;
+}
+
+SEC("uprobe/uv__getaddrinfo_done")
+int uprobe_uv_getaddrinfo_done(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    u32 tid = (__u32)(pid_tgid);
+
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+    // uv__getaddrinfo_done(struct uv__work *w, int status)
+    // arg1 = RDI = uv__work_t* w  (= &req->work_req, stessa chiave usata sopra)
+
+    u64 work_ptr = ctx->di; //1st parameter
+    u32 *sid = bpf_map_lookup_elem(&getaddrinfo_map, &work_ptr);
+    if (sid)
+        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe/uv__getaddrinfo_done")
+int uretprobe_uv_getaddrinfo_done(struct pt_regs *ctx) {
     u32 tid = (__u32)bpf_get_current_pid_tgid();
     bpf_map_delete_elem(&tid_async_stack_map, &tid);
     return 0;

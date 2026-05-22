@@ -207,6 +207,9 @@ func main() {
 		log.Fatalf("Cannot open executable for uprobe: %v", err)
 	}
 
+	//
+	//							- 1 - Filesystem
+	//
 	upWorkSubmit, err := ex.Uprobe("uv__work_submit", objs.UprobeUvWorkSubmit, nil)
 	if err != nil {
 		log.Printf("⚠️  uprobe uv__work_submit: %v", err)
@@ -226,6 +229,31 @@ func main() {
 		log.Printf("⚠️  uretprobe uv__fs_work: %v", err)
 	} else {
 		defer urFsWork.Close()
+	}
+
+	//
+	//						- 2 - DNS resolution + TCP connect
+	//
+
+	upGetaddrinfo, err := ex.Uprobe("uv_getaddrinfo", objs.UprobeUvGetaddrinfo, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv_getaddrinfo: %v", err)
+	} else {
+		defer upGetaddrinfo.Close()
+	}
+
+	upGetaddrinfoDone, err := ex.Uprobe("uv__getaddrinfo_done", objs.UprobeUvGetaddrinfoDone, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv__getaddrinfo_done: %v", err)
+	} else {
+		defer upGetaddrinfoDone.Close()
+	}
+
+	urGetaddrinfoDone, err := ex.Uretprobe("uv__getaddrinfo_done", objs.UretprobeUvGetaddrinfoDone, nil)
+	if err != nil {
+		log.Printf("⚠️  uretprobe uv__getaddrinfo_done: %v", err)
+	} else {
+		defer urGetaddrinfoDone.Close()
 	}
 
 	// -------------------------------------------------------------------------
