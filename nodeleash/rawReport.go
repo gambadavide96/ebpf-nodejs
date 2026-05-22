@@ -13,15 +13,31 @@ import (
 	"time"
 )
 
-func recordRawStack(tracker map[string]map[string][]string, syscallName string, frames []ResolvedFrame) {
+type RawStackEntry struct {
+	SyncFrames  []string `json:"sync"`
+	AsyncFrames []string `json:"async,omitempty"`
+}
+
+func recordRawStack(tracker map[string]map[string]RawStackEntry,
+	syscallName string, syncFrames, asyncFrames []ResolvedFrame) {
+
 	if tracker[syscallName] == nil {
-		tracker[syscallName] = make(map[string][]string)
+		tracker[syscallName] = make(map[string]RawStackEntry)
 	}
-	names := framesToStrings(frames)
-	hash := hashRawFrames(names)
+	sync := framesToStrings(syncFrames)
+	async := framesToStrings(asyncFrames)
+	hash := hashDualFrames(sync, async)
 	if _, exists := tracker[syscallName][hash]; !exists {
-		tracker[syscallName][hash] = names
+		tracker[syscallName][hash] = RawStackEntry{SyncFrames: sync, AsyncFrames: async}
 	}
+}
+
+func hashDualFrames(sync, async []string) string {
+	h := sha256.New()
+	h.Write([]byte(strings.Join(sync, "|")))
+	h.Write([]byte("||ASYNC||"))
+	h.Write([]byte(strings.Join(async, "|")))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func framesToStrings(frames []ResolvedFrame) []string {
@@ -38,29 +54,35 @@ func hashRawFrames(frames []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func printRawReport(tracker map[string]map[string][]string) {
+func printRawReport(tracker map[string]map[string]RawStackEntry) {
 	if len(tracker) == 0 {
 		fmt.Println("\n⚠️  No raw stacks collected.")
 		return
 	}
-
 	syscalls := make([]string, 0, len(tracker))
 	for sc := range tracker {
 		syscalls = append(syscalls, sc)
 	}
 	sort.Strings(syscalls)
 
-	fmt.Printf("\n%s\n  RAW REPORT — Syscall → Stack Traces (%d syscalls)\n%s\n",
+	fmt.Printf("\n%s\n  RAW REPORT — %d syscalls\n%s\n",
 		strings.Repeat("═", 60), len(tracker), strings.Repeat("═", 60))
 
 	for _, sc := range syscalls {
-		stacks := tracker[sc]
-		fmt.Printf("\n🔹 %-20s (%d unique stack(s))\n", sc, len(stacks))
+		entries := tracker[sc]
+		fmt.Printf("\n🔹 %-20s (%d unique stack(s))\n", sc, len(entries))
 		i := 1
-		for _, frames := range stacks {
+		for _, e := range entries {
 			fmt.Printf("   Stack #%d:\n", i)
-			for j, f := range frames {
+			fmt.Printf("   ── sync ──\n")
+			for j, f := range e.SyncFrames {
 				fmt.Printf("      [%2d] %s\n", j, f)
+			}
+			if len(e.AsyncFrames) > 0 {
+				fmt.Printf("   ── async origin ──\n")
+				for j, f := range e.AsyncFrames {
+					fmt.Printf("      [%2d] %s\n", j, f)
+				}
 			}
 			i++
 		}
@@ -68,14 +90,14 @@ func printRawReport(tracker map[string]map[string][]string) {
 	fmt.Printf("\n%s\n", strings.Repeat("─", 60))
 }
 
-func exportRawReport(targetPID int, tracker map[string]map[string][]string) {
+func exportRawReport(targetPID int, tracker map[string]map[string]RawStackEntry) {
 	if len(tracker) == 0 {
 		return
 	}
-	flat := make(map[string][][]string, len(tracker))
-	for sc, stacks := range tracker {
-		for _, frames := range stacks {
-			flat[sc] = append(flat[sc], frames)
+	flat := make(map[string][]RawStackEntry, len(tracker))
+	for sc, entries := range tracker {
+		for _, e := range entries {
+			flat[sc] = append(flat[sc], e)
 		}
 	}
 	data, err := json.MarshalIndent(flat, "", "  ")

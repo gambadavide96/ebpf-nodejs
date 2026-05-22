@@ -13,10 +13,11 @@ import (
 // When ok=false, only Syscall is populated — callers use it for
 // the UnattributedPolicy safety net.
 type AnalyzedStack struct {
-	Syscall      string
-	Responsible  string   // package that triggered the syscall ("" if unattributed)
-	CallPath     []string // [outermost_caller, ..., Responsible]
-	CallPathHash string
+	Syscall         string
+	Responsible     string   // package that triggered the syscall ("" if unattributed)
+	CallPath        []string // [outermost_caller, ..., Responsible]
+	CallPathHash    string
+	AsyncAttributed bool
 }
 
 type FrameKind int
@@ -176,32 +177,30 @@ func buildCallPath(frames []ResolvedFrame) (responsible string, callPath []strin
 // Main entry point
 // -----------------------------------------------------------------------
 
-// AnalyzeStack processes a single eBPF event.
-//
-// Returns (event, true) when attribution succeeds.
-// Returns (AnalyzedStack{Syscall: syscallName}, false) when attribution fails.
-// Callers record the syscall name in UnattributedPolicy.
-//
-// Attribution works for syscalls executed synchronously or quasi-synchronously,
-// i.e. while the JS frame is still physically present on the native stack.
-// Asynchronous I/O (deferred by libuv or the worker thread pool) produces
-// stacks with no user-land JS frames and ends up in UnattributedPolicy.
-func AnalyzeStack(syscallName string, frames []ResolvedFrame) (AnalyzedStack, bool) {
+func AnalyzeStack(syscallName string, syncFrames, asyncFrames []ResolvedFrame) (AnalyzedStack, bool) {
+	if responsible, callPath, found := buildCallPath(syncFrames); found {
 
-	responsible, callPath, found := buildCallPath(frames)
-
-	//If we haven't found the responsible
-	//we pass the syscall to assign it in unattributed fallback
-	if !found {
-		return AnalyzedStack{Syscall: syscallName}, false
+		return AnalyzedStack{
+			Syscall:      syscallName,
+			Responsible:  responsible,
+			CallPath:     callPath,
+			CallPathHash: hashCallPath(callPath),
+		}, true
 	}
 
-	return AnalyzedStack{
-		Syscall:      syscallName,
-		Responsible:  responsible,
-		CallPath:     callPath,
-		CallPathHash: hashCallPath(callPath),
-	}, true
+	if len(asyncFrames) > 0 {
+		if responsible, callPath, found := buildCallPath(asyncFrames); found {
+			return AnalyzedStack{
+				Syscall:         syscallName,
+				Responsible:     responsible,
+				CallPath:        callPath,
+				CallPathHash:    hashCallPath(callPath),
+				AsyncAttributed: true,
+			}, true
+		}
+	}
+
+	return AnalyzedStack{Syscall: syscallName}, false
 }
 
 func hashCallPath(path []string) string {

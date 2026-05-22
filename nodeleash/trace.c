@@ -2,6 +2,7 @@
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h> 
 
 // ============================================================================
 // EVENT STRUCTURE — mirrors SyscallInfo in main.go (20 bytes, no padding)
@@ -11,6 +12,7 @@ struct ebpf_syscall_info {
     __u32 pid;
     __u32 syscall_id;
     int   stack_id;
+    int async_stack_id;
 };
 
 // ============================================================================
@@ -51,6 +53,20 @@ struct {
     __type(value, __u8);  // always 1 (set semantics)
     __uint(max_entries, 256);
 } noise_syscalls_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u64);   // uv__work_t*
+    __type(value, __u32); // stack_id
+    __uint(max_entries, 4096);
+} work_ptr_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);   // tid
+    __type(value, __u32); // stack_id saved on submission
+    __uint(max_entries, 1024);
+} tid_async_stack_map SEC(".maps");
 
 // ============================================================================
 // TRACEPOINT ARGUMENT STRUCTURES
@@ -106,6 +122,7 @@ SEC("tracepoint/raw_syscalls/sys_enter")
 int trace_sys_enter(struct sys_enter_args *ctx) {
     u64 pid_tgid   = bpf_get_current_pid_tgid();
     u32 pid        = (__u32)(pid_tgid >> 32);
+    u32 tid        = (__u32)(pid_tgid);
     u32 syscall_id = (__u32)ctx->id;
 
     // If the pid isn't in the map, we ignore it
@@ -123,6 +140,12 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
     if (stack_id < 0)
         return 0;
 
+    //Get the async stack for the current thread if present
+    int async_stack_id = -1;
+    u32 *async_sid = bpf_map_lookup_elem(&tid_async_stack_map, &tid);
+    if (async_sid)
+        async_stack_id = (int)*async_sid;
+
     // Reserve 20 bytes in ring buffer
     struct ebpf_syscall_info *info = bpf_ringbuf_reserve(&ring_buffer, sizeof(*info), 0);
     if (!info)
@@ -132,8 +155,58 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
     info->pid          = pid;
     info->syscall_id   = syscall_id;
     info->stack_id     = stack_id;
+    info->async_stack_id = async_stack_id;
 
     bpf_ringbuf_submit(info, 0);
+    return 0;
+}
+
+// ============================================================================
+// UPROBES
+// ============================================================================
+
+//1 - Filesystem
+
+SEC("uprobe/uv__work_submit")
+int uprobe_uv_work_submit(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+    // uv__work_submit(uv_loop_t *loop, struct uv__work *w, ...)
+    // arg2 = RSI = uv__work_t* w
+    u64 work_ptr = PT_REGS_PARM2(ctx);
+    int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
+    if (stack_id < 0)
+        return 0;
+
+    u32 sid = (u32)stack_id;
+    bpf_map_update_elem(&work_ptr_map, &work_ptr, &sid, BPF_ANY);
+    return 0;
+}
+
+SEC("uprobe/uv__fs_work")
+int uprobe_uv_fs_work(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    u32 tid = (__u32)(pid_tgid);
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+    // uv__fs_work(struct uv__work *w)
+    // arg1 = RDI = uv__work_t* w
+    u64 work_ptr = PT_REGS_PARM1(ctx);
+    u32 *sid = bpf_map_lookup_elem(&work_ptr_map, &work_ptr);
+    if (sid)
+        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe/uv__fs_work")
+int uretprobe_uv_fs_work(struct pt_regs *ctx) {
+    u32 tid = (__u32)bpf_get_current_pid_tgid();
+    bpf_map_delete_elem(&tid_async_stack_map, &tid);
     return 0;
 }
 

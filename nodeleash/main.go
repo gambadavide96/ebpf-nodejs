@@ -1,6 +1,7 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpf trace trace.c
+// Specific target for x86_64:
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target amd64 trace trace.c
 
 import (
 	"bytes"
@@ -26,10 +27,11 @@ import (
 // SyscallInfo mirrors ebpf_syscall_info in trace.c.
 // 20 bytes, naturally aligned — must match exactly (binary.Read is used).
 type SyscallInfo struct {
-	TimestampNs uint64
-	Pid         uint32
-	SyscallId   uint32
-	StackId     int32
+	TimestampNs  uint64
+	Pid          uint32
+	SyscallId    uint32
+	StackId      int32
+	AsyncStackId int32
 }
 
 func getSyscallName(id uint32) string {
@@ -38,6 +40,27 @@ func getSyscallName(id uint32) string {
 		return fmt.Sprintf("syscall_%d", id)
 	}
 	return name
+}
+
+func resolveStack(objs *traceObjects, stackId int32, pid uint32, symb *BlazeSymbolizer) []ResolvedFrame {
+	if stackId < 0 {
+		return nil
+	}
+	var rawFrames [127]uint64
+	if err := objs.StackMap.Lookup(&stackId, &rawFrames); err != nil {
+		return nil
+	}
+	var ips []uint64
+	for _, ip := range rawFrames {
+		if ip == 0 {
+			break
+		}
+		ips = append(ips, ip)
+	}
+	if len(ips) == 0 {
+		return nil
+	}
+	return symb.ResolveBatch(ips, pid)
 }
 
 // =========================================================================
@@ -128,7 +151,7 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// eBPF setup — identical for both modes
+	// eBPF setup - Load Object and Tracepoints
 	// -------------------------------------------------------------------------
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal(err)
@@ -171,13 +194,48 @@ func main() {
 	defer tpExit.Close()
 
 	// -------------------------------------------------------------------------
+	// eBPF setup - Uprobes
+	// -------------------------------------------------------------------------
+
+	nodePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", targetPID))
+	if err != nil {
+		log.Fatalf("Cannot resolve node executable: %v", err)
+	}
+
+	ex, err := link.OpenExecutable(nodePath)
+	if err != nil {
+		log.Fatalf("Cannot open executable for uprobe: %v", err)
+	}
+
+	upWorkSubmit, err := ex.Uprobe("uv__work_submit", objs.UprobeUvWorkSubmit, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv__work_submit: %v", err)
+	} else {
+		defer upWorkSubmit.Close()
+	}
+
+	upFsWork, err := ex.Uprobe("uv__fs_work", objs.UprobeUvFsWork, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv__fs_work: %v", err)
+	} else {
+		defer upFsWork.Close()
+	}
+
+	urFsWork, err := ex.Uretprobe("uv__fs_work", objs.UretprobeUvFsWork, nil)
+	if err != nil {
+		log.Printf("⚠️  uretprobe uv__fs_work: %v", err)
+	} else {
+		defer urFsWork.Close()
+	}
+
+	// -------------------------------------------------------------------------
 	// Mode-specific state
 	// -------------------------------------------------------------------------
 	var (
 		// Analyze mode
 		policy             Policy
 		unattributedPolicy *UnattributedPolicy
-		rawTracker         map[string]map[string][]string
+		rawTracker         map[string]map[string]RawStackEntry
 
 		// Enforce mode
 		engine *EnforcementEngine
@@ -187,7 +245,7 @@ func main() {
 	case "analyze":
 		policy = NewPolicy()
 		unattributedPolicy = NewUnattributedPolicy()
-		rawTracker = make(map[string]map[string][]string)
+		rawTracker = make(map[string]map[string]RawStackEntry)
 		fmt.Printf("🔍 NodeLeash [ANALYZE] — PID: %d\n", targetPID)
 
 	case "enforce":
@@ -254,44 +312,22 @@ func main() {
 			continue
 		}
 
-		// Step 2: retrieve current stack addresses from the eBPF stack map.
-		var rawFrames [127]uint64
-		if err := objs.StackMap.Lookup(&info.StackId, &rawFrames); err != nil {
+		// Step 2-3 : Decoding sync and async stacks
+		syncFrames := resolveStack(&objs, info.StackId, info.Pid, symb)
+		if syncFrames == nil {
 			continue
 		}
-		var validIPs []uint64
-		for _, ip := range rawFrames {
-			if ip == 0 {
-				break
-			}
-			validIPs = append(validIPs, ip)
-		}
-		if len(validIPs) == 0 {
-			continue
-		}
-
-		syscallName := getSyscallName(info.SyscallId)
-
-		// Step 3: resolve instruction pointers → ResolvedFrame{Name, Module}.
-		// Name: from Blazesym (V8 perf map for JS, ELF for Node binary).
-		// Module: from /proc/<pid>/maps — available even for unresolved symbols.
-		// Requires Node.js started with --perf-basic-prof for JS frame names.
-		resolvedFrames := symb.ResolveBatch(validIPs, info.Pid)
+		asyncFrames := resolveStack(&objs, info.AsyncStackId, info.Pid, symb)
 
 		// Step 4 (analyze only): record raw stack before any filtering.
+		syscallName := getSyscallName(info.SyscallId)
+
 		if mode == "analyze" {
-			recordRawStack(rawTracker, syscallName, resolvedFrames)
+			recordRawStack(rawTracker, syscallName, syncFrames, asyncFrames)
 		}
 
-		// Step 5: classify frames, build call path, map syscall → capability.
-		// Returns (event, true) for attributed events.
-		// Returns (AnalyzedStack{Syscall: syscallName}, false) when attribution fails.
-		// Callers record the syscall name in UnattributedPolicy. for unattributed.
-		// Attribution works only when the JS frame is present on the native
-		// stack at the moment of the syscall (synchronous/quasi-synchronous
-		// execution). Deferred async I/O via libuv or the worker thread pool
-		// produces stacks with no user-land frames → UnattributedPolicy.
-		event, ok := AnalyzeStack(syscallName, resolvedFrames)
+		// Step 5: Analyze stack to get syscall responsible
+		event, ok := AnalyzeStack(syscallName, syncFrames, asyncFrames)
 
 		// Step 6: branch on mode.
 		switch mode {
@@ -299,16 +335,19 @@ func main() {
 			if ok {
 				policy.Record(event)
 			} else if event.Syscall != "" {
-				// Unattributed but Syscall known: feed the safety net.
 				unattributedPolicy.Record(event.Syscall)
 			}
 
 			eventTime := bootTime.Add(time.Duration(info.TimestampNs))
 
 			if ok {
-				fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s\n",
+				asyncLabel := ""
+				if event.AsyncAttributed {
+					asyncLabel = " [async]"
+				}
+				fmt.Printf("\n🕒 [%s] [PID:%d] %s → %s%s\n",
 					eventTime.Format("15:04:05.000000"),
-					info.Pid, event.Syscall, event.Responsible)
+					info.Pid, event.Syscall, event.Responsible, asyncLabel)
 				fmt.Printf("   path: %s\n", strings.Join(event.CallPath, " → "))
 			} else if event.Syscall != "" {
 				fmt.Printf("\n🕒 [%s] [PID:%d] %s → [unattributed]\n",
@@ -316,8 +355,15 @@ func main() {
 					info.Pid, event.Syscall)
 			}
 
-			for i, f := range resolvedFrames {
+			fmt.Printf("   ── sync stack ──\n")
+			for i, f := range syncFrames {
 				fmt.Printf("      [%2d] %s\n", i, f.Display())
+			}
+			if len(asyncFrames) > 0 {
+				fmt.Printf("   ── async origin ──\n")
+				for i, f := range asyncFrames {
+					fmt.Printf("      [%2d] %s\n", i, f.Display())
+				}
 			}
 
 		case "enforce":
