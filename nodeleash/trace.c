@@ -62,7 +62,7 @@ struct {
     __uint(max_entries, 4096);
 } work_ptr_map SEC(".maps");
 
-// Category 2a — DNS + TCP connect
+// Category 2 — DNS + TCP connect
 // Key: &uv_getaddrinfo_t.work_req  (= arg1 di uv__getaddrinfo_done)
 // OFFSET_GETADDRINFO_WORK_REQ:
 // gdb $(which node) -batch -ex "p (long)&((uv_getaddrinfo_t*)0)->work_req" -ex quit
@@ -76,24 +76,6 @@ struct {
     __type(value, __u32);
     __uint(max_entries, 512);
 } getaddrinfo_map SEC(".maps");
-
-// Category 2b — Direct TCP connect (IP without DNS)
-// Key: uv_tcp_t* handle (stable from uv_tcp_connect to AfterConnect)
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, __u64);
-    __type(value, __u32);
-    __uint(max_entries, 512);
-} tcp_connect_map SEC(".maps");
-
-// Category 3 — Stream write (TCP/pipe)
-// Key: uv_stream_t* (same handle passed by uv_write and receveid by uv__write)
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, __u64);
-    __type(value, __u32);
-    __uint(max_entries, 512);
-} stream_write_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -247,7 +229,7 @@ int uretprobe_uv_fs_work(struct pt_regs *ctx) {
 }
 
 // ============================================================================
-// CATEGORY 2a — DNS resolution + TCP connect
+// CATEGORY 2 — DNS resolution + TCP connect
 // ============================================================================
 
 SEC("uprobe/uv_getaddrinfo")
@@ -301,93 +283,5 @@ int uretprobe_uv_getaddrinfo_done(struct pt_regs *ctx) {
     return 0;
 }
 
-// ============================================================================
-// CATEGORY 2b — Direct TCP connect with IP (without DNS)
-// ============================================================================
-//
-// Covers the case: net.createConnection({ host: '1.2.3.4', port: 80 })
-// where uv_getaddrinfo is not called because the host is already an IP.
-//
-// uv_tcp_connect is synchronous — the JS stack is present at the time of the probe.
-// No TRANSFER/CLEANUP needed: the connect() syscall happens immediately.
-// In the same call, trace_sys_enter captures it via tid_async_stack_map.
-
-SEC("uprobe/uv_tcp_connect")
-int uprobe_uv_tcp_connect(struct pt_regs *ctx) {
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 pid = (__u32)(pid_tgid >> 32);
-    u32 tid = (__u32)(pid_tgid);
-    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
-        return 0;
-
-    // uv_tcp_connect(uv_connect_t *req, uv_tcp_t *handle, ...)
-    // arg2 = RSI = uv_tcp_t* handle
-    // JS stack is present → save directly in tid_async_stack_map
-    int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
-    if (stack_id < 0)
-        return 0;
-
-    u32 sid = (u32)stack_id;
-    bpf_map_update_elem(&tid_async_stack_map, &tid, &sid, BPF_ANY);
-    return 0;
-}
-
-SEC("uretprobe/uv_tcp_connect")
-int uretprobe_uv_tcp_connect(struct pt_regs *ctx) {
-    u32 tid = (__u32)bpf_get_current_pid_tgid();
-    bpf_map_delete_elem(&tid_async_stack_map, &tid);
-    return 0;
-}
-
-
-// ============================================================================
-// CATEGORY 3 — Stream write (TCP/pipe)
-// ============================================================================
-
-SEC("uprobe/uv_write")
-int uprobe_uv_write(struct pt_regs *ctx) {
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 pid = (__u32)(pid_tgid >> 32);
-
-    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
-        return 0;
-
-    // uv_write(uv_write_t *req, uv_stream_t *handle, ...)
-    // arg2 = RSI = uv_stream_t* handle
-    u64 stream_ptr = PT_REGS_PARM2(ctx);
-    int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
-    if (stack_id < 0)
-        return 0;
-
-    u32 sid = (u32)stack_id;
-    bpf_map_update_elem(&stream_write_map, &stream_ptr, &sid, BPF_ANY);
-    return 0;
-}
-
-SEC("uprobe/uv__write")
-int uprobe_uv_write_internal(struct pt_regs *ctx) {
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 pid = (__u32)(pid_tgid >> 32);
-    u32 tid = (__u32)(pid_tgid);
-
-    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
-        return 0;
-
-    // uv__write(uv_stream_t *stream)
-    // arg1 = RDI = uv_stream_t* stream
-    u64 stream_ptr = PT_REGS_PARM1(ctx);
-    
-    u32 *sid = bpf_map_lookup_elem(&stream_write_map, &stream_ptr);
-    if (sid)
-        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
-    return 0;
-}
-
-SEC("uretprobe/uv__write")
-int uretprobe_uv_write_internal(struct pt_regs *ctx) {
-    u32 tid = (__u32)bpf_get_current_pid_tgid();
-    bpf_map_delete_elem(&tid_async_stack_map, &tid);
-    return 0;
-}
 
 char __license[] SEC("license") = "Dual MIT/GPL";
