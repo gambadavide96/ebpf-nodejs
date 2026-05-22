@@ -334,9 +334,9 @@ func main() {
 
 	switch mode {
 	case "analyze":
-		policy.PrintSummary()
-		unattributedPolicy.PrintSummary()
-		printRawReport(rawTracker)
+		//policy.PrintSummary()
+		//unattributedPolicy.PrintSummary()
+		//printRawReport(rawTracker)
 		exportRawReport(int(targetPID), rawTracker)
 
 		if err := policy.Export(int(targetPID), "policy"); err != nil {
