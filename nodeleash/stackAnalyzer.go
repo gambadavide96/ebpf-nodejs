@@ -117,6 +117,12 @@ func extractJSPackageName(rawPath string) string {
 	if idx := strings.Index(clean, ":"); idx > 1 {
 		clean = clean[:idx]
 	}
+
+	// Syntetic path for code runned dinamically — starts with ":" (es. ":3:81", ":1:1")
+	if strings.HasPrefix(clean, ":") || clean == "" {
+		return "eval"
+	}
+
 	clean = filepath.Clean(clean)
 
 	if idx := strings.Index(clean, "node_modules/"); idx != -1 {

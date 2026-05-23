@@ -5,7 +5,7 @@
 #include <bpf/bpf_tracing.h> 
 
 // ============================================================================
-// EVENT STRUCTURE — mirrors SyscallInfo in main.go (20 bytes, no padding)
+// EVENT STRUCTURE — mirrors SyscallInfo in main.go (24 bytes, no padding)
 // ============================================================================
 struct ebpf_syscall_info {
     __u64 timestamp_ns;
@@ -63,7 +63,7 @@ struct {
 } work_ptr_map SEC(".maps");
 
 // Category 2 — DNS + TCP connect
-// Key: &uv_getaddrinfo_t.work_req  (= arg1 di uv__getaddrinfo_done)
+// Key: &uv_getaddrinfo_t.work_req  (= arg1 of uv__getaddrinfo_done)
 // OFFSET_GETADDRINFO_WORK_REQ:
 // gdb $(which node) -batch -ex "p (long)&((uv_getaddrinfo_t*)0)->work_req" -ex quit
 #ifndef OFFSET_GETADDRINFO_WORK_REQ

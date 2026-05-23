@@ -25,7 +25,7 @@ import (
 )
 
 // SyscallInfo mirrors ebpf_syscall_info in trace.c.
-// 20 bytes, naturally aligned — must match exactly (binary.Read is used).
+// 24 bytes, naturally aligned — must match exactly (binary.Read is used).
 type SyscallInfo struct {
 	TimestampNs  uint64
 	Pid          uint32
