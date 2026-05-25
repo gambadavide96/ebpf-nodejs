@@ -136,9 +136,12 @@ int trace_exit(void *ctx) {
 // Captures syscall events for tracked processes.
 SEC("tracepoint/raw_syscalls/sys_enter")
 int trace_sys_enter(struct sys_enter_args *ctx) {
+    //PID here is actually TGID (Thread Group ID)—that is, the main process identifier, 
+    //shared by all threads. And is in the higher 32 bits.
+    //TID is the individual thread identifier, and is the lower 32 bits.
     u64 pid_tgid   = bpf_get_current_pid_tgid();
-    u32 pid        = (__u32)(pid_tgid >> 32);
-    u32 tid        = (__u32)(pid_tgid);
+    u32 pid        = (__u32)(pid_tgid >> 32);  //shift the right 32 bits → get the high 32 bits → PID
+    u32 tid        = (__u32)(pid_tgid);       // cast to 32 bits → truncate the high 32 bits → TID
     u32 syscall_id = (__u32)ctx->id;
 
     // If the pid isn't in the map, we ignore it
@@ -181,10 +184,25 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
 // UPROBES
 // ============================================================================
 
+// When an uprobe fires, the kernel saves the state of all CPU registers
+// into struct pt_regs, passed to the BPF program as ctx.
+//
+// On x86-64, the System V AMD64 ABI calling convention defines that
+// integer arguments are passed in registers in this order:
+//   arg1 → RDI,  arg2 → RSI,  arg3 → RDX,  arg4 → RCX
+//
+// PT_REGS_PARM2(ctx) reads ctx->si (= RSI) — the second argument
+// of the hooked function at the time of the call.
+
 // ============================================================================
 // CATEGORY 1 — Filesystem
 // ============================================================================
 
+// ENTRY probe — fired on main thread when an async filesystem operation
+// is submitted to the libuv thread pool. The JS call stack is still
+// present at this point, so we capture it and save it in work_ptr_map
+// keyed by the uv__work_t* pointer, which remains stable until the
+// worker thread picks up and executes the work item.
 SEC("uprobe/uv__work_submit")
 int uprobe_uv_work_submit(struct pt_regs *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -204,6 +222,13 @@ int uprobe_uv_work_submit(struct pt_regs *ctx) {
     return 0;
 }
 
+// TRANSFER probe — fired on the worker thread when the filesystem
+// operation is about to execute. The JS call stack is no longer
+// present here, but we recover the stack captured at submission time
+// by looking up work_ptr_map using the same uv__work_t* pointer.
+// The recovered stack_id is stored in tid_async_stack_map keyed by
+// the worker thread TID, making it available to trace_sys_enter for
+// all syscalls that occur during this work item execution.
 SEC("uprobe/uv__fs_work")
 int uprobe_uv_fs_work(struct pt_regs *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -221,6 +246,11 @@ int uprobe_uv_fs_work(struct pt_regs *ctx) {
     return 0;
 }
 
+// CLEANUP probe — fired when uv__fs_work returns, signaling that the
+// filesystem operation has completed. Removes the async context from
+// tid_async_stack_map to prevent the worker thread TID from being
+// incorrectly attributed to subsequent unrelated operations when the
+// thread is reused by the libuv thread pool.
 SEC("uretprobe/uv__fs_work")
 int uretprobe_uv_fs_work(struct pt_regs *ctx) {
     u32 tid = (__u32)bpf_get_current_pid_tgid();
