@@ -46,7 +46,7 @@ struct {
 // Populated at startup from noiseSyscalls.go.
 // Syscalls present in this map are dropped before reaching the ring buffer —
 // they are pure Node.js/OS infrastructure with no attribution value:
-// mutex ops (futex), event loop waits (epoll_wait, poll), scheduling (yield).
+// mutex ops (futex), event loop waits (epoll_wait, poll), scheduling (yield) ecc..
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, __u32);   // syscall ID
