@@ -262,6 +262,13 @@ int uretprobe_uv_fs_work(struct pt_regs *ctx) {
 // CATEGORY 2 — DNS resolution + TCP connect
 // ============================================================================
 
+
+// ENTRY probe — fired on the main thread when a DNS resolution is submitted.
+// The JS call stack is still present at this point, so we capture it and
+// save it in getaddrinfo_map. Since uv__getaddrinfo_done receives uv__work_t*
+// (which points to uv_getaddrinfo_t.work_req) instead of uv_getaddrinfo_t*,
+// we compute the key as req + OFFSET_GETADDRINFO_WORK_REQ so that the lookup
+// in the TRANSFER probe will match the argument it receives directly.
 SEC("uprobe/uv_getaddrinfo")
 int uprobe_uv_getaddrinfo(struct pt_regs *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -287,6 +294,13 @@ int uprobe_uv_getaddrinfo(struct pt_regs *ctx) {
     return 0;
 }
 
+// TRANSFER probe — fired on the main thread when DNS resolution completes,
+// just before AfterGetAddrInfo executes the TCP connect. The JS call stack
+// is no longer present at this point, but we recover the stack captured at
+// submission time by looking up getaddrinfo_map using the uv__work_t* pointer.
+// The recovered stack_id is stored in tid_async_stack_map keyed by the main
+// thread TID, making it available to trace_sys_enter for the socket() and
+// connect() syscalls that occur within this function's execution window.
 SEC("uprobe/uv__getaddrinfo_done")
 int uprobe_uv_getaddrinfo_done(struct pt_regs *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -306,6 +320,10 @@ int uprobe_uv_getaddrinfo_done(struct pt_regs *ctx) {
     return 0;
 }
 
+// CLEANUP probe — fired when uv__getaddrinfo_done returns, signaling that
+// the TCP connect sequence has completed. Removes the async context from
+// tid_async_stack_map to prevent the main thread TID from being incorrectly
+// attributed to subsequent unrelated syscalls.
 SEC("uretprobe/uv__getaddrinfo_done")
 int uretprobe_uv_getaddrinfo_done(struct pt_regs *ctx) {
     u32 tid = (__u32)bpf_get_current_pid_tgid();
