@@ -39,20 +39,9 @@ struct {
 // Ring buffer. 4MB handles event bursts on loaded servers.
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 4 * 1024 * 1024);
+    __uint(max_entries, 16 * 1024 * 1024); //16MB
 } ring_buffer SEC(".maps");
 
-// Infrastructure syscall blocklist.
-// Populated at startup from noiseSyscalls.go.
-// Syscalls present in this map are dropped before reaching the ring buffer —
-// they are pure Node.js/OS infrastructure with no attribution value:
-// mutex ops (futex), event loop waits (epoll_wait, poll), scheduling (yield) ecc..
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, __u32);   // syscall ID
-    __type(value, __u8);  // always 1 (set semantics)
-    __uint(max_entries, 256);
-} noise_syscalls_map SEC(".maps");
 
 //Category 1 — Filesystem
 struct {
@@ -83,6 +72,41 @@ struct {
     __type(value, __u32); // stack_id saved on submission
     __uint(max_entries, 1024);
 } tid_async_stack_map SEC(".maps");
+
+
+// ============================================================================
+// CATEGORY 1 — Thread pool async attribution — helpers
+// ============================================================================
+
+
+// Shared logic for all TRANSFER probes.
+// Recovers the JS stack saved at submission time by looking up work_ptr_map
+// using the uv__work_t* pointer received as arg1 (RDI), then stores it in
+// tid_async_stack_map keyed by the worker thread TID so that trace_sys_enter
+// can attribute all syscalls occurring during this work item's execution.
+static __always_inline int handle_work_transfer(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    u32 tid = (__u32)(pid_tgid);
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+    u64 work_ptr = PT_REGS_PARM1(ctx);
+    u32 *sid = bpf_map_lookup_elem(&work_ptr_map, &work_ptr);
+    if (sid)
+        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
+    return 0;
+}
+
+// Shared logic for all CLEANUP probes.
+// Removes the async context from tid_async_stack_map when the work function
+// returns, preventing the worker thread TID from being incorrectly attributed
+// to subsequent unrelated operations when the thread is reused by the pool.
+static __always_inline int handle_work_cleanup(struct pt_regs *ctx) {
+    u32 tid = (__u32)bpf_get_current_pid_tgid();
+    bpf_map_delete_elem(&tid_async_stack_map, &tid);
+    return 0;
+}
+
 
 // ============================================================================
 // TRACEPOINT ARGUMENT STRUCTURES
@@ -148,12 +172,6 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
     if (!bpf_map_lookup_elem(&target_pid_map, &pid))
         return 0;
 
-     // Drop infrastructure/noise syscalls before capturing the stack.
-    // This avoids wasting stack_map entries and ring buffer space on
-    // futex, epoll_wait, poll and other syscalls with no attribution value.
-    if (bpf_map_lookup_elem(&noise_syscalls_map, &syscall_id))
-        return 0;
-
     //Get the current stack for the process that triggered sys_enter    
     int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
     if (stack_id < 0)
@@ -195,14 +213,26 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
 // of the hooked function at the time of the call.
 
 // ============================================================================
-// CATEGORY 1 — Filesystem
+// CATEGORY 1 — Thread pool async attribution
+//
+// Pattern: ENTRY (main thread, JS stack present) → TRANSFER (worker thread,
+// JS stack absent) → CLEANUP (worker thread, operation complete).
+//
+// uv__work_submit is the single common entry point for ALL thread pool
+// operations. Each specific work function receives the same uv__work_t*
+// pointer as argument, allowing lookup of the stack captured at submission
+// time. The same TRANSFER and CLEANUP logic applies to all work functions.
+//
+// Covered operations:
+//   uv__fs_work          — filesystem (openat, read, write, close, stat)
+//   uv__getaddrinfo_work — DNS forward lookup, covers c-ares worker syscalls
 // ============================================================================
 
-// ENTRY probe — fired on main thread when an async filesystem operation
-// is submitted to the libuv thread pool. The JS call stack is still
-// present at this point, so we capture it and save it in work_ptr_map
-// keyed by the uv__work_t* pointer, which remains stable until the
-// worker thread picks up and executes the work item.
+
+// ENTRY — fired on the main thread when any operation is submitted to the
+// libuv thread pool. The JS call stack is still present at this point.
+// Captures the stack and saves it in work_ptr_map keyed by uv__work_t* (RSI),
+// which remains stable across the main thread → worker thread boundary.
 SEC("uprobe/uv__work_submit")
 int uprobe_uv_work_submit(struct pt_regs *ctx) {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -222,40 +252,31 @@ int uprobe_uv_work_submit(struct pt_regs *ctx) {
     return 0;
 }
 
-// TRANSFER probe — fired on the worker thread when the filesystem
-// operation is about to execute. The JS call stack is no longer
-// present here, but we recover the stack captured at submission time
-// by looking up work_ptr_map using the same uv__work_t* pointer.
-// The recovered stack_id is stored in tid_async_stack_map keyed by
-// the worker thread TID, making it available to trace_sys_enter for
-// all syscalls that occur during this work item execution.
+// TRANSFER/CLEANUP — filesystem operations (fs.readFile, fs.writeFile, etc.)
+// Syscalls attributed: openat, read, write, close, stat, mkdir, unlink, rename
+// Note: only the first step of chained operations (e.g. fs.readFile open step)
+// is attributed — subsequent steps are submitted from internal C callbacks
+// where the JS stack is already gone.
 SEC("uprobe/uv__fs_work")
-int uprobe_uv_fs_work(struct pt_regs *ctx) {
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 pid = (__u32)(pid_tgid >> 32);
-    u32 tid = (__u32)(pid_tgid);
-    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
-        return 0;
-
-    // uv__fs_work(struct uv__work *w)
-    // arg1 = RDI = uv__work_t* w
-    u64 work_ptr = PT_REGS_PARM1(ctx);
-    u32 *sid = bpf_map_lookup_elem(&work_ptr_map, &work_ptr);
-    if (sid)
-        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
-    return 0;
+int uprobe_uv__fs_work(struct pt_regs *ctx) {
+    return handle_work_transfer(ctx);
+}
+SEC("uretprobe/uv__fs_work")
+int uretprobe_uv__fs_work(struct pt_regs *ctx) {
+    return handle_work_cleanup(ctx);
 }
 
-// CLEANUP probe — fired when uv__fs_work returns, signaling that the
-// filesystem operation has completed. Removes the async context from
-// tid_async_stack_map to prevent the worker thread TID from being
-// incorrectly attributed to subsequent unrelated operations when the
-// thread is reused by the libuv thread pool.
-SEC("uretprobe/uv__fs_work")
-int uretprobe_uv_fs_work(struct pt_regs *ctx) {
-    u32 tid = (__u32)bpf_get_current_pid_tgid();
-    bpf_map_delete_elem(&tid_async_stack_map, &tid);
-    return 0;
+// TRANSFER/CLEANUP — DNS forward lookup (dns.lookup, net.createConnection)
+// Syscalls attributed: socket, connect, sendto, recvfrom of c-ares on the
+// worker thread. Without this probe these syscalls appear as unattributed
+// noise indistinguishable from legitimate DNS resolution.
+SEC("uprobe/uv__getaddrinfo_work")
+int uprobe_uv__getaddrinfo_work(struct pt_regs *ctx) {
+    return handle_work_transfer(ctx);
+}
+SEC("uretprobe/uv__getaddrinfo_work")
+int uretprobe_uv__getaddrinfo_work(struct pt_regs *ctx) {
+    return handle_work_cleanup(ctx);
 }
 
 // ============================================================================

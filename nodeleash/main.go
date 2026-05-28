@@ -169,12 +169,6 @@ func main() {
 		log.Fatalf("Inserting PID: %v", err)
 	}
 
-	// Populate the kernel-side infrastructure syscall blocklist.
-	// Drops futex, epoll_wait, poll and other noise before they reach userspace.
-	if err := populateNoiseSyscalls(objs); err != nil {
-		log.Fatalf("Populating noise syscall filter: %v", err)
-	}
-
 	tpSysEnter, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
 	if err != nil {
 		log.Fatalf("sys_enter: %v", err)
@@ -207,9 +201,10 @@ func main() {
 		log.Fatalf("Cannot open executable for uprobe: %v", err)
 	}
 
-	//
-	//							 1 - Filesystem
-	//
+	// ============================================================================
+	// CATEGORY 1 - Thread Pool
+	// ============================================================================
+
 	upWorkSubmit, err := ex.Uprobe("uv__work_submit", objs.UprobeUvWorkSubmit, nil)
 	if err != nil {
 		log.Printf("⚠️  uprobe uv__work_submit: %v", err)
@@ -217,18 +212,32 @@ func main() {
 		defer upWorkSubmit.Close()
 	}
 
+	// Filesystem
 	upFsWork, err := ex.Uprobe("uv__fs_work", objs.UprobeUvFsWork, nil)
 	if err != nil {
 		log.Printf("⚠️  uprobe uv__fs_work: %v", err)
 	} else {
 		defer upFsWork.Close()
 	}
-
 	urFsWork, err := ex.Uretprobe("uv__fs_work", objs.UretprobeUvFsWork, nil)
 	if err != nil {
 		log.Printf("⚠️  uretprobe uv__fs_work: %v", err)
 	} else {
 		defer urFsWork.Close()
+	}
+
+	// DNS forward lookup (c-ares worker thread syscalls)
+	upGetaddrinfoWork, err := ex.Uprobe("uv__getaddrinfo_work", objs.UprobeUvGetaddrinfoWork, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv__getaddrinfo_work: %v", err)
+	} else {
+		defer upGetaddrinfoWork.Close()
+	}
+	urGetaddrinfoWork, err := ex.Uretprobe("uv__getaddrinfo_work", objs.UretprobeUvGetaddrinfoWork, nil)
+	if err != nil {
+		log.Printf("⚠️  uretprobe uv__getaddrinfo_work: %v", err)
+	} else {
+		defer urGetaddrinfoWork.Close()
 	}
 
 	//
