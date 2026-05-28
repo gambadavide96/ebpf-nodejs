@@ -36,35 +36,32 @@ struct {
     __uint(max_entries, 8192);
 } stack_map SEC(".maps");
 
-// Ring buffer. 4MB handles event bursts on loaded servers.
+// Infrastructure syscall blocklist.
+// Populated at startup from noiseSyscalls.go.
+// Syscalls present in this map are dropped before reaching the ring buffer —
+// they are pure Node.js/OS infrastructure with no attribution value:
+// mutex ops (futex), event loop waits (epoll_wait, poll), scheduling (yield) ecc..
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);   // syscall ID
+    __type(value, __u8);  // always 1 (set semantics)
+    __uint(max_entries, 256);
+} noise_syscalls_map SEC(".maps");
+
+// Ring buffer. 16MB handles event bursts on loaded servers.
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 16 * 1024 * 1024); //16MB
 } ring_buffer SEC(".maps");
 
 
-//Category 1 — Filesystem
+//Category 1 — Thread Pool
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, __u64);   // uv__work_t*
     __type(value, __u32); // stack_id
     __uint(max_entries, 4096);
 } work_ptr_map SEC(".maps");
-
-// Category 2 — DNS + TCP connect
-// Key: &uv_getaddrinfo_t.work_req  (= arg1 of uv__getaddrinfo_done)
-// OFFSET_GETADDRINFO_WORK_REQ:
-// gdb $(which node) -batch -ex "p (long)&((uv_getaddrinfo_t*)0)->work_req" -ex quit
-#ifndef OFFSET_GETADDRINFO_WORK_REQ
-#define OFFSET_GETADDRINFO_WORK_REQ 72
-#endif
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, __u64);
-    __type(value, __u32);
-    __uint(max_entries, 512);
-} getaddrinfo_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -280,77 +277,8 @@ int uretprobe_uv__getaddrinfo_work(struct pt_regs *ctx) {
 }
 
 // ============================================================================
-// CATEGORY 2 — DNS resolution + TCP connect
+// CATEGORY 2 — 
 // ============================================================================
-
-
-// ENTRY probe — fired on the main thread when a DNS resolution is submitted.
-// The JS call stack is still present at this point, so we capture it and
-// save it in getaddrinfo_map. Since uv__getaddrinfo_done receives uv__work_t*
-// (which points to uv_getaddrinfo_t.work_req) instead of uv_getaddrinfo_t*,
-// we compute the key as req + OFFSET_GETADDRINFO_WORK_REQ so that the lookup
-// in the TRANSFER probe will match the argument it receives directly.
-SEC("uprobe/uv_getaddrinfo")
-int uprobe_uv_getaddrinfo(struct pt_regs *ctx) {
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 pid = (__u32)(pid_tgid >> 32);
-
-    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
-        return 0;
-
-    // uv_getaddrinfo(uv_loop_t *loop, uv_getaddrinfo_t *req, ...)
-    // arg2 = RSI = uv_getaddrinfo_t* req
-    // key: req + offset = &req->work_req
-    // so in uv__getaddrinfo_done(uv__work_t* w) the lookup is correct
-
-    u64 req_ptr  = PT_REGS_PARM2(ctx);  // RSI = uv_getaddrinfo_t* req
-    u64 work_key = req_ptr + OFFSET_GETADDRINFO_WORK_REQ;
-
-    int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
-    if (stack_id < 0)
-        return 0;
-
-    u32 sid = (u32)stack_id;
-    bpf_map_update_elem(&getaddrinfo_map, &work_key, &sid, BPF_ANY);
-    return 0;
-}
-
-// TRANSFER probe — fired on the main thread when DNS resolution completes,
-// just before AfterGetAddrInfo executes the TCP connect. The JS call stack
-// is no longer present at this point, but we recover the stack captured at
-// submission time by looking up getaddrinfo_map using the uv__work_t* pointer.
-// The recovered stack_id is stored in tid_async_stack_map keyed by the main
-// thread TID, making it available to trace_sys_enter for the socket() and
-// connect() syscalls that occur within this function's execution window.
-SEC("uprobe/uv__getaddrinfo_done")
-int uprobe_uv_getaddrinfo_done(struct pt_regs *ctx) {
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 pid = (__u32)(pid_tgid >> 32);
-    u32 tid = (__u32)(pid_tgid);
-
-    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
-        return 0;
-
-    // uv__getaddrinfo_done(struct uv__work *w, int status)
-    // arg1 = RDI = uv__work_t* w  (= &req->work_req, stessa chiave usata sopra)
-
-    u64 work_ptr = PT_REGS_PARM1(ctx);  // RDI = uv__work_t* w
-    u32 *sid = bpf_map_lookup_elem(&getaddrinfo_map, &work_ptr);
-    if (sid)
-        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
-    return 0;
-}
-
-// CLEANUP probe — fired when uv__getaddrinfo_done returns, signaling that
-// the TCP connect sequence has completed. Removes the async context from
-// tid_async_stack_map to prevent the main thread TID from being incorrectly
-// attributed to subsequent unrelated syscalls.
-SEC("uretprobe/uv__getaddrinfo_done")
-int uretprobe_uv_getaddrinfo_done(struct pt_regs *ctx) {
-    u32 tid = (__u32)bpf_get_current_pid_tgid();
-    bpf_map_delete_elem(&tid_async_stack_map, &tid);
-    return 0;
-}
 
 
 char __license[] SEC("license") = "Dual MIT/GPL";

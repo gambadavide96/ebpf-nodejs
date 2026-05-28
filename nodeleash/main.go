@@ -169,6 +169,12 @@ func main() {
 		log.Fatalf("Inserting PID: %v", err)
 	}
 
+	// Populate the kernel-side infrastructure syscall blocklist.
+	// Drops futex, epoll_wait, poll and other noise before they reach userspace.
+	if err := populateNoiseSyscalls(objs); err != nil {
+		log.Fatalf("Populating noise syscall filter: %v", err)
+	}
+
 	tpSysEnter, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
 	if err != nil {
 		log.Fatalf("sys_enter: %v", err)
@@ -238,31 +244,6 @@ func main() {
 		log.Printf("⚠️  uretprobe uv__getaddrinfo_work: %v", err)
 	} else {
 		defer urGetaddrinfoWork.Close()
-	}
-
-	//
-	//						2 - DNS resolution + TCP connect
-	//
-
-	upGetaddrinfo, err := ex.Uprobe("uv_getaddrinfo", objs.UprobeUvGetaddrinfo, nil)
-	if err != nil {
-		log.Printf("⚠️  uprobe uv_getaddrinfo: %v", err)
-	} else {
-		defer upGetaddrinfo.Close()
-	}
-
-	upGetaddrinfoDone, err := ex.Uprobe("uv__getaddrinfo_done", objs.UprobeUvGetaddrinfoDone, nil)
-	if err != nil {
-		log.Printf("⚠️  uprobe uv__getaddrinfo_done: %v", err)
-	} else {
-		defer upGetaddrinfoDone.Close()
-	}
-
-	urGetaddrinfoDone, err := ex.Uretprobe("uv__getaddrinfo_done", objs.UretprobeUvGetaddrinfoDone, nil)
-	if err != nil {
-		log.Printf("⚠️  uretprobe uv__getaddrinfo_done: %v", err)
-	} else {
-		defer urGetaddrinfoDone.Close()
 	}
 
 	// -------------------------------------------------------------------------
