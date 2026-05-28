@@ -1,7 +1,7 @@
 'use strict';
 const net = require('net');
 
-console.log(`PID: ${process.pid} — hai 5 secondi`);
+console.log(`PID: ${process.pid}`);
 
 setInterval(function connectFunction() {
     // Connessione con IP diretto — bypassa uv_getaddrinfo

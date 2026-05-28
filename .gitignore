@@ -2,7 +2,7 @@
 # 1. Compiled Executables
 # ---------------------------------------------------
 # Ignore the main compiled binary of the tool
-
+nodeleash
 
 # ---------------------------------------------------
 # 2. ebpf-go (bpf2go) Generated Files

@@ -16,31 +16,35 @@ import (
 // infrastructure are included.
 var noiseSyscalls = []string{
 	// -------------------------------------------------------------------------
-	// Synchronization primitives — libuv thread pool, V8 garbage collector.
-	// These are called millions of times per second and never point to
-	// user-land package behaviour.
+	// Synchronization primitives — libuv thread pool, V8 garbage collector
 	// -------------------------------------------------------------------------
-	"futex",
-	"futex_time64",
+	"futex",        // mutex/condvar — called millions of times per second
+	"futex_time64", // 32-bit time variant of futex (some kernels)
+	"epoll_ctl",
+	"io_uring_enter",
+	"ioctl",
 
 	// -------------------------------------------------------------------------
 	// Event loop waiting — epoll/poll/select are the heart of libuv's I/O loop.
-	// Filtering only the *wait* variants — epoll_ctl is kept because it
-	// tracks fd registration which has attribution value.
+	// When the event loop is idle these dominate the syscall stream.
 	// -------------------------------------------------------------------------
 	"epoll_wait",
 	"epoll_pwait",
 	"epoll_pwait2",
+	"poll",
+	"ppoll",
+	"select",
+	"pselect6",
 
 	// -------------------------------------------------------------------------
-	// Scheduling — pure CPU scheduling, no I/O or resource access
+	// Scheduling — yielding execution to other threads/processes
 	// -------------------------------------------------------------------------
 	"sched_yield",
 	"nanosleep",
 	"clock_nanosleep",
 
 	// -------------------------------------------------------------------------
-	// Signal handling — pure infrastructure, no user code involvement
+	// Signal handling infrastructure — called on every event loop iteration
 	// -------------------------------------------------------------------------
 	"rt_sigprocmask",
 	"rt_sigaction",
@@ -48,9 +52,39 @@ var noiseSyscalls = []string{
 	"sigaltstack",
 
 	// -------------------------------------------------------------------------
-	// NodeLeash self-noise — overhead of the probe mechanism itself.
-	// syscall_335 appears attributed to user code but is an artifact of
-	// NodeLeash's own uretprobe instrumentation, not real package behaviour.
+	// Time queries - continuous called from Node.js for internal timing operations
+	// -------------------------------------------------------------------------
+	"clock_gettime",
+	"gettimeofday",
+
+	// -------------------------------------------------------------------------
+	// Memory Management - Node.js internal memory management
+	// -------------------------------------------------------------------------
+	"brk",
+	"mmap",
+	"mprotect",
+	"munmap",
+
+	// -------------------------------------------------------------------------
+	// File descriptor metadata — libuv internal
+	// -------------------------------------------------------------------------
+	"fstat",
+	"statx",
+	"newfstatat",
+	"lseek",
+
+	// -------------------------------------------------------------------------
+	// Process identity — Node.js runtime
+	// -------------------------------------------------------------------------
+	"getpid",
+
+	// -------------------------------------------------------------------------
+	// Memory management — V8 GC
+	// -------------------------------------------------------------------------
+	"madvise",
+
+	// -------------------------------------------------------------------------
+	// NodeLeash noise
 	// -------------------------------------------------------------------------
 	"uretprobe",
 }

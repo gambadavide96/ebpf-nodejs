@@ -168,6 +168,12 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
     // If the pid isn't in the map, we ignore it
     if (!bpf_map_lookup_elem(&target_pid_map, &pid))
         return 0;
+    
+    // Drop infrastructure/noise syscalls before capturing the stack.
+    // This avoids wasting stack_map entries and ring buffer space on
+    // futex, epoll_wait, poll and other syscalls with no attribution value.
+    if (bpf_map_lookup_elem(&noise_syscalls_map, &syscall_id))
+        return 0;
 
     //Get the current stack for the process that triggered sys_enter    
     int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
