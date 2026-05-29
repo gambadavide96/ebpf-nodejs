@@ -257,46 +257,6 @@ func main() {
 		defer urTcpConnect.Close()
 	}
 
-	// ============================================================================
-	// CATEGORY 3 — UDP attribution
-	// ============================================================================
-
-	// ENTRY — UDP handle creation (JS stack present)
-	upUdpInit, err := ex.Uprobe("uv_udp_init", objs.UprobeUvUdpInit, nil)
-	if err != nil {
-		log.Printf("⚠️  uprobe uv_udp_init: %v", err)
-	} else {
-		defer upUdpInit.Close()
-	}
-
-	// TRANSFER/CLEANUP — connected UDP
-	upUdpConnect, err := ex.Uprobe("uv_udp_connect", objs.UprobeUvUdpConnect, nil)
-	if err != nil {
-		log.Printf("⚠️  uprobe uv_udp_connect: %v", err)
-	} else {
-		defer upUdpConnect.Close()
-	}
-	urUdpConnect, err := ex.Uretprobe("uv_udp_connect", objs.UretprobeUvUdpConnect, nil)
-	if err != nil {
-		log.Printf("⚠️  uretprobe uv_udp_connect: %v", err)
-	} else {
-		defer urUdpConnect.Close()
-	}
-
-	// TRANSFER/CLEANUP — unconnected UDP send
-	upUdpSend, err := ex.Uprobe("uv_udp_send", objs.UprobeUvUdpSend, nil)
-	if err != nil {
-		log.Printf("⚠️  uprobe uv_udp_send: %v", err)
-	} else {
-		defer upUdpSend.Close()
-	}
-	urUdpSend, err := ex.Uretprobe("uv_udp_send", objs.UretprobeUvUdpSend, nil)
-	if err != nil {
-		log.Printf("⚠️  uretprobe uv_udp_send: %v", err)
-	} else {
-		defer urUdpSend.Close()
-	}
-
 	// -------------------------------------------------------------------------
 	// Mode-specific state
 	// -------------------------------------------------------------------------
