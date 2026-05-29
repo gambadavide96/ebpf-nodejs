@@ -71,46 +71,20 @@ struct {
     __uint(max_entries, 4096);
 } tcp_init_map SEC(".maps");
 
+// Category 3 map: uv_udp_t* → stack_id
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u64);    // uv_udp_t*
+    __type(value, __u32);  // stack_id
+    __uint(max_entries, 4096);
+} udp_init_map SEC(".maps");
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, __u32);   // tid
     __type(value, __u32); // stack_id saved on submission
     __uint(max_entries, 1024);
 } tid_async_stack_map SEC(".maps");
-
-
-// ============================================================================
-// CATEGORY 1 — Thread pool async attribution — helpers
-// ============================================================================
-
-
-// Shared logic for all TRANSFER probes.
-// Recovers the JS stack saved at submission time by looking up work_ptr_map
-// using the uv__work_t* pointer received as arg1 (RDI), then stores it in
-// tid_async_stack_map keyed by the worker thread TID so that trace_sys_enter
-// can attribute all syscalls occurring during this work item's execution.
-static __always_inline int handle_work_transfer(struct pt_regs *ctx) {
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 pid = (__u32)(pid_tgid >> 32);
-    u32 tid = (__u32)(pid_tgid);
-    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
-        return 0;
-    u64 work_ptr = PT_REGS_PARM1(ctx);
-    u32 *sid = bpf_map_lookup_elem(&work_ptr_map, &work_ptr);
-    if (sid)
-        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
-    return 0;
-}
-
-// Shared logic for all CLEANUP probes.
-// Removes the async context from tid_async_stack_map when the work function
-// returns, preventing the worker thread TID from being incorrectly attributed
-// to subsequent unrelated operations when the thread is reused by the pool.
-static __always_inline int handle_work_cleanup(struct pt_regs *ctx) {
-    u32 tid = (__u32)bpf_get_current_pid_tgid();
-    bpf_map_delete_elem(&tid_async_stack_map, &tid);
-    return 0;
-}
 
 
 // ============================================================================
@@ -223,8 +197,9 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
 // PT_REGS_PARM2(ctx) reads ctx->si (= RSI) — the second argument
 // of the hooked function at the time of the call.
 
+
 // ============================================================================
-// CATEGORY 1 — Thread pool async attribution
+// CATEGORY 1 — Thread pool File system attribution
 //
 // Pattern: ENTRY (main thread, JS stack present) → TRANSFER (worker thread,
 // JS stack absent) → CLEANUP (worker thread, operation complete).
@@ -236,7 +211,6 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
 //
 // Covered operations:
 //   uv__fs_work          — filesystem (openat, read, write, close, stat)
-//   uv__getaddrinfo_work — DNS forward lookup, covers c-ares worker syscalls
 // ============================================================================
 
 
@@ -270,24 +244,24 @@ int uprobe_uv_work_submit(struct pt_regs *ctx) {
 // where the JS stack is already gone.
 SEC("uprobe/uv__fs_work")
 int uprobe_uv__fs_work(struct pt_regs *ctx) {
-    return handle_work_transfer(ctx);
-}
-SEC("uretprobe/uv__fs_work")
-int uretprobe_uv__fs_work(struct pt_regs *ctx) {
-    return handle_work_cleanup(ctx);
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    u32 tid = (__u32)(pid_tgid);
+
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+    u64 work_ptr = PT_REGS_PARM1(ctx);
+    u32 *sid = bpf_map_lookup_elem(&work_ptr_map, &work_ptr);
+    if (sid)
+        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
+    return 0;
 }
 
-// TRANSFER/CLEANUP — DNS forward lookup (dns.lookup, net.createConnection)
-// Syscalls attributed: socket, connect, sendto, recvfrom of c-ares on the
-// worker thread. Without this probe these syscalls appear as unattributed
-// noise indistinguishable from legitimate DNS resolution.
-SEC("uprobe/uv__getaddrinfo_work")
-int uprobe_uv__getaddrinfo_work(struct pt_regs *ctx) {
-    return handle_work_transfer(ctx);
-}
-SEC("uretprobe/uv__getaddrinfo_work")
-int uretprobe_uv__getaddrinfo_work(struct pt_regs *ctx) {
-    return handle_work_cleanup(ctx);
+SEC("uretprobe/uv__fs_work")
+int uretprobe_uv__fs_work(struct pt_regs *ctx) {
+    u32 tid = (__u32)bpf_get_current_pid_tgid();
+    bpf_map_delete_elem(&tid_async_stack_map, &tid);
+    return 0;
 }
 
 // ============================================================================
@@ -356,6 +330,94 @@ int uprobe_uv_tcp_connect(struct pt_regs *ctx) {
 // CLEANUP — fired when uv_tcp_connect returns.
 SEC("uretprobe/uv_tcp_connect")
 int uretprobe_uv_tcp_connect(struct pt_regs *ctx) {
+    u32 tid = (__u32)bpf_get_current_pid_tgid();
+    bpf_map_delete_elem(&tid_async_stack_map, &tid);
+    return 0;
+}
+
+// ============================================================================
+// CATEGORY 3 — UDP attribution
+//
+// Mirrors Category 2 TCP pattern using uv_udp_t* as correlation key.
+// uv_udp_init receives uv_udp_t* as arg2 (RSI) with JS stack present.
+// uv_udp_connect receives uv_udp_t* as arg1 (RDI).
+// uv_udp_send receives uv_udp_t* as arg2 (RSI).
+// ============================================================================
+
+// ENTRY — fired when a new UDP handle is created.
+// Called synchronously inside dgram.createSocket() with JS stack present.
+// Saves the stack in udp_init_map keyed by uv_udp_t* (RSI).
+//
+// uv_udp_init(uv_loop_t* loop, uv_udp_t* handle)
+//   arg1 = RDI = uv_loop_t*
+//   arg2 = RSI = uv_udp_t*  ← correlation key
+SEC("uprobe/uv_udp_init")
+int uprobe_uv_udp_init(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+    u64 udp_handle_ptr = PT_REGS_PARM2(ctx);  // RSI = uv_udp_t*
+    int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
+    if (stack_id < 0)
+        return 0;
+
+    u32 sid = (u32)stack_id;
+    bpf_map_update_elem(&udp_init_map, &udp_handle_ptr, &sid, BPF_ANY);
+    return 0;
+}
+
+// TRANSFER/CLEANUP — connected UDP socket.
+// Covers dgram.connect() — binds the socket to a fixed remote address.
+// Syscalls attributed: connect() on UDP socket.
+//
+// uv_udp_connect(uv_udp_t* handle, const struct sockaddr* addr)
+//   arg1 = RDI = uv_udp_t*  ← same key as uv_udp_init
+SEC("uprobe/uv_udp_connect")
+int uprobe_uv_udp_connect(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    u32 tid = (__u32)(pid_tgid);
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+    u64 udp_handle_ptr = PT_REGS_PARM1(ctx);  // RDI = uv_udp_t*
+    u32 *sid = bpf_map_lookup_elem(&udp_init_map, &udp_handle_ptr);
+    if (sid)
+        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
+    return 0;
+}
+SEC("uretprobe/uv_udp_connect")
+int uretprobe_uv_udp_connect(struct pt_regs *ctx) {
+    u32 tid = (__u32)bpf_get_current_pid_tgid();
+    bpf_map_delete_elem(&tid_async_stack_map, &tid);
+    return 0;
+}
+
+// TRANSFER/CLEANUP — unconnected UDP send.
+// Covers dgram.send() — sends a datagram to a specific destination.
+// Syscalls attributed: sendto(), sendmsg(), sendmmsg().
+//
+// uv_udp_send(uv_udp_send_t* req, uv_udp_t* handle, ...)
+//   arg1 = RDI = uv_udp_send_t*
+//   arg2 = RSI = uv_udp_t*  ← same key as uv_udp_init
+SEC("uprobe/uv_udp_send")
+int uprobe_uv_udp_send(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    u32 tid = (__u32)(pid_tgid);
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+    u64 udp_handle_ptr = PT_REGS_PARM2(ctx);  // RSI = uv_udp_t*
+    u32 *sid = bpf_map_lookup_elem(&udp_init_map, &udp_handle_ptr);
+    if (sid)
+        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
+    return 0;
+}
+SEC("uretprobe/uv_udp_send")
+int uretprobe_uv_udp_send(struct pt_regs *ctx) {
     u32 tid = (__u32)bpf_get_current_pid_tgid();
     bpf_map_delete_elem(&tid_async_stack_map, &tid);
     return 0;

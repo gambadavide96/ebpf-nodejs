@@ -208,7 +208,7 @@ func main() {
 	}
 
 	// ============================================================================
-	// CATEGORY 1 - Thread Pool
+	// CATEGORY 1 - Filesystem Thread Pool
 	// ============================================================================
 
 	upWorkSubmit, err := ex.Uprobe("uv__work_submit", objs.UprobeUvWorkSubmit, nil)
@@ -218,7 +218,6 @@ func main() {
 		defer upWorkSubmit.Close()
 	}
 
-	// Filesystem
 	upFsWork, err := ex.Uprobe("uv__fs_work", objs.UprobeUvFsWork, nil)
 	if err != nil {
 		log.Printf("⚠️  uprobe uv__fs_work: %v", err)
@@ -230,20 +229,6 @@ func main() {
 		log.Printf("⚠️  uretprobe uv__fs_work: %v", err)
 	} else {
 		defer urFsWork.Close()
-	}
-
-	// DNS forward lookup (c-ares worker thread syscalls)
-	upGetaddrinfoWork, err := ex.Uprobe("uv__getaddrinfo_work", objs.UprobeUvGetaddrinfoWork, nil)
-	if err != nil {
-		log.Printf("⚠️  uprobe uv__getaddrinfo_work: %v", err)
-	} else {
-		defer upGetaddrinfoWork.Close()
-	}
-	urGetaddrinfoWork, err := ex.Uretprobe("uv__getaddrinfo_work", objs.UretprobeUvGetaddrinfoWork, nil)
-	if err != nil {
-		log.Printf("⚠️  uretprobe uv__getaddrinfo_work: %v", err)
-	} else {
-		defer urGetaddrinfoWork.Close()
 	}
 
 	// ============================================================================
@@ -270,6 +255,46 @@ func main() {
 		log.Printf("⚠️  uretprobe uv_tcp_connect: %v", err)
 	} else {
 		defer urTcpConnect.Close()
+	}
+
+	// ============================================================================
+	// CATEGORY 3 — UDP attribution
+	// ============================================================================
+
+	// ENTRY — UDP handle creation (JS stack present)
+	upUdpInit, err := ex.Uprobe("uv_udp_init", objs.UprobeUvUdpInit, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv_udp_init: %v", err)
+	} else {
+		defer upUdpInit.Close()
+	}
+
+	// TRANSFER/CLEANUP — connected UDP
+	upUdpConnect, err := ex.Uprobe("uv_udp_connect", objs.UprobeUvUdpConnect, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv_udp_connect: %v", err)
+	} else {
+		defer upUdpConnect.Close()
+	}
+	urUdpConnect, err := ex.Uretprobe("uv_udp_connect", objs.UretprobeUvUdpConnect, nil)
+	if err != nil {
+		log.Printf("⚠️  uretprobe uv_udp_connect: %v", err)
+	} else {
+		defer urUdpConnect.Close()
+	}
+
+	// TRANSFER/CLEANUP — unconnected UDP send
+	upUdpSend, err := ex.Uprobe("uv_udp_send", objs.UprobeUvUdpSend, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv_udp_send: %v", err)
+	} else {
+		defer upUdpSend.Close()
+	}
+	urUdpSend, err := ex.Uretprobe("uv_udp_send", objs.UretprobeUvUdpSend, nil)
+	if err != nil {
+		log.Printf("⚠️  uretprobe uv_udp_send: %v", err)
+	} else {
+		defer urUdpSend.Close()
 	}
 
 	// -------------------------------------------------------------------------
