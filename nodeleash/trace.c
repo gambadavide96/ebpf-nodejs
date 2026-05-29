@@ -63,6 +63,14 @@ struct {
     __uint(max_entries, 4096);
 } work_ptr_map SEC(".maps");
 
+// Category 2 map: uv_tcp_t* → stack_id
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u64);    // uv_tcp_t*
+    __type(value, __u32);  // stack_id
+    __uint(max_entries, 4096);
+} tcp_init_map SEC(".maps");
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, __u32);   // tid
@@ -283,8 +291,75 @@ int uretprobe_uv__getaddrinfo_work(struct pt_regs *ctx) {
 }
 
 // ============================================================================
-// CATEGORY 2 — 
+// CATEGORY 2 — TCP connect attribution
+//
+// Pattern: ENTRY (uv_tcp_init, JS stack present) →
+// TRANSFER (uv_tcp_connect, JS stack absent) →
+// CLEANUP (uv_tcp_connect returns).
+//
+// Both functions receive uv_tcp_t* as arg2 (RSI) — no offset navigation
+// required. uv_tcp_init is called synchronously during net.createConnection()
+// before process.nextTick removes the JS frame. uv_tcp_connect is called
+// from TCPWrap::Connect after process.nextTick, just before connect().
+//
+// Syscalls attributed: connect()
 // ============================================================================
+
+// ENTRY — fired when a new TCP handle is created.
+// Called synchronously inside net.createConnection() / http.request() /
+// net.createServer() before process.nextTick defers the connect.
+// The JS call stack is still present at this point.
+//
+// uv_tcp_init(uv_loop_t* loop, uv_tcp_t* handle)
+//   arg1 = RDI = uv_loop_t*
+//   arg2 = RSI = uv_tcp_t*  ← correlation key, no offset needed
+SEC("uprobe/uv_tcp_init")
+int uprobe_uv_tcp_init(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+    u64 tcp_handle_ptr = PT_REGS_PARM2(ctx);  // RSI = uv_tcp_t*
+    int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);
+    if (stack_id < 0)
+        return 0;
+
+    u32 sid = (u32)stack_id;
+    bpf_map_update_elem(&tcp_init_map, &tcp_handle_ptr, &sid, BPF_ANY);
+    return 0;
+}
+
+// TRANSFER — fired just before the non-blocking connect() syscall.
+// Called from TCPWrap::Connect after process.nextTick has removed the
+// JS frame. Recovers the stack saved at uv_tcp_init time using the
+// same uv_tcp_t* pointer received as arg2 (RSI).
+//
+// uv_tcp_connect(uv_connect_t* req, uv_tcp_t* handle, ...)
+//   arg1 = RDI = uv_connect_t*
+//   arg2 = RSI = uv_tcp_t*  ← same key as uv_tcp_init
+SEC("uprobe/uv_tcp_connect")
+int uprobe_uv_tcp_connect(struct pt_regs *ctx) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = (__u32)(pid_tgid >> 32);
+    u32 tid = (__u32)(pid_tgid);
+    if (!bpf_map_lookup_elem(&target_pid_map, &pid))
+        return 0;
+
+    u64 tcp_handle_ptr = PT_REGS_PARM2(ctx);  // RSI = uv_tcp_t*
+    u32 *sid = bpf_map_lookup_elem(&tcp_init_map, &tcp_handle_ptr);
+    if (sid)
+        bpf_map_update_elem(&tid_async_stack_map, &tid, sid, BPF_ANY);
+    return 0;
+}
+
+// CLEANUP — fired when uv_tcp_connect returns.
+SEC("uretprobe/uv_tcp_connect")
+int uretprobe_uv_tcp_connect(struct pt_regs *ctx) {
+    u32 tid = (__u32)bpf_get_current_pid_tgid();
+    bpf_map_delete_elem(&tid_async_stack_map, &tid);
+    return 0;
+}
 
 
 char __license[] SEC("license") = "Dual MIT/GPL";

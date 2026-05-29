@@ -246,6 +246,32 @@ func main() {
 		defer urGetaddrinfoWork.Close()
 	}
 
+	// ============================================================================
+	// CATEGORY 2 — TCP connect attribution
+	// ============================================================================
+
+	// ENTRY — TCP handle creation (JS stack present)
+	upTcpInit, err := ex.Uprobe("uv_tcp_init", objs.UprobeUvTcpInit, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv_tcp_init: %v", err)
+	} else {
+		defer upTcpInit.Close()
+	}
+
+	// TRANSFER + CLEANUP — connect() syscall
+	upTcpConnect, err := ex.Uprobe("uv_tcp_connect", objs.UprobeUvTcpConnect, nil)
+	if err != nil {
+		log.Printf("⚠️  uprobe uv_tcp_connect: %v", err)
+	} else {
+		defer upTcpConnect.Close()
+	}
+	urTcpConnect, err := ex.Uretprobe("uv_tcp_connect", objs.UretprobeUvTcpConnect, nil)
+	if err != nil {
+		log.Printf("⚠️  uretprobe uv_tcp_connect: %v", err)
+	} else {
+		defer urTcpConnect.Close()
+	}
+
 	// -------------------------------------------------------------------------
 	// Mode-specific state
 	// -------------------------------------------------------------------------
