@@ -75,7 +75,7 @@ func (e *EnforcementEngine) Check(event AnalyzedStack, pid uint32, syscallName s
 	}
 
 	// Safety net check: unattributed event.
-	if event.Syscall != "" && e.unattributedPolicy.CheckViolation(event.Syscall) {
+	if e.unattributedPolicy.CheckViolation(event.Syscall) {
 		e.logViolation(Violation{
 			Time:    time.Now(),
 			Pid:     pid,
