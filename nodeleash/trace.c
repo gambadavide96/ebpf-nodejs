@@ -28,11 +28,10 @@ struct {
 } target_pid_map SEC(".maps");
 
 // User-space stack traces.
-// 8192 entries handles real-world Node.js workloads without drops.
 struct {
     __uint(type, BPF_MAP_TYPE_STACK_TRACE);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, 127 * sizeof(__u64));
+    __uint(key_size, sizeof(__u32));    // 4 bytes
+    __uint(value_size, 127 * sizeof(__u64)); // 127 addresses of 8 bytes each one
     __uint(max_entries, 8192);
 } stack_map SEC(".maps");
 
