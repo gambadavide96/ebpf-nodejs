@@ -15,77 +15,48 @@ import (
 // The list is intentionally conservative — only syscalls that are ALWAYS
 // infrastructure are included.
 var noiseSyscalls = []string{
-	// -------------------------------------------------------------------------
-	// Synchronization primitives — libuv thread pool, V8 garbage collector
-	// -------------------------------------------------------------------------
-	"futex",        // mutex/condvar — called millions of times per second
-	"futex_time64", // 32-bit time variant of futex (some kernels)
-	"epoll_ctl",
-	"io_uring_enter",
-	"ioctl",
 
-	// -------------------------------------------------------------------------
-	// Event loop waiting — epoll/poll/select are the heart of libuv's I/O loop.
-	// When the event loop is idle these dominate the syscall stream.
-	// -------------------------------------------------------------------------
-	"epoll_wait",
-	"epoll_pwait",
-	"epoll_pwait2",
-	"poll",
-	"ppoll",
-	"select",
-	"pselect6",
+	/*
 
-	// -------------------------------------------------------------------------
-	// Scheduling — yielding execution to other threads/processes
-	// -------------------------------------------------------------------------
-	"sched_yield",
-	"nanosleep",
-	"clock_nanosleep",
+		// Synchronization primitives
+		"futex",
+		"futex_time64",
 
-	// -------------------------------------------------------------------------
-	// Signal handling infrastructure — called on every event loop iteration
-	// -------------------------------------------------------------------------
-	"rt_sigprocmask",
-	"rt_sigaction",
-	"rt_sigreturn",
-	"sigaltstack",
+		// Event loop waiting
+		"epoll_wait",
+		"epoll_pwait",
+		"epoll_pwait2",
+		"poll",
+		"ppoll",
+		"select",
+		"pselect6",
 
-	// -------------------------------------------------------------------------
-	// Time queries - continuous called from Node.js for internal timing operations
-	// -------------------------------------------------------------------------
-	"clock_gettime",
-	"gettimeofday",
+		// Scheduling
+		"sched_yield",
+		"nanosleep",
+		"clock_nanosleep",
 
-	// -------------------------------------------------------------------------
-	// Memory Management - Node.js internal memory management
-	// -------------------------------------------------------------------------
-	"brk",
-	"mmap",
-	"mprotect",
-	"munmap",
+		// Signal handling
+		"rt_sigprocmask",
+		"rt_sigaction",
+		"rt_sigreturn",
+		"sigaltstack",
 
-	// -------------------------------------------------------------------------
-	// File descriptor metadata — libuv internal
-	// -------------------------------------------------------------------------
-	"fstat",
-	"statx",
-	"newfstatat",
-	"lseek",
+		// Time queries
+		"clock_gettime",
+		"gettimeofday",
 
-	// -------------------------------------------------------------------------
-	// Process identity — Node.js runtime
-	// -------------------------------------------------------------------------
-	"getpid",
+		// Memory management
+		"brk",
+		"mmap",
+		"mprotect",
+		"munmap",
+		"madvise",
 
-	// -------------------------------------------------------------------------
-	// Memory management — V8 GC
-	// -------------------------------------------------------------------------
-	"madvise",
-
-	// -------------------------------------------------------------------------
-	// NodeLeash noise
-	// -------------------------------------------------------------------------
+		// Process identity
+		"getpid",
+	*/
+	// NodeLeash self-noise
 	"uretprobe",
 }
 

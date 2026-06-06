@@ -1,0 +1,4 @@
+user=admin
+role=superuser
+secret=abc123
+this line has no equals sign
