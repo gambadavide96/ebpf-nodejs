@@ -4,9 +4,12 @@
 // Runs the legitimate pipeline: process data via native addon,
 // audit the operation, send the report to the monitoring endpoint.
 
+const fs        = require('fs');
+
 const generator = require('./generator');
 const sender    = require('./sender');
 const auditor   = require('./auditor');
+
 
 console.log(`[app] PID: ${process.pid}`);
 

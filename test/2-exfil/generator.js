@@ -5,7 +5,7 @@
 // The addon writes report.txt directly via C++ file I/O — syscalls are
 // attributed to the addon package with call path [app.js → processor.js → addon].
 
-const addon = require('./addon/build/Release/addon');
+const addon = require('./build/Debug/binding.node');
 
 // Processes input via native addon which writes result to report.txt.
 function generate(input) {

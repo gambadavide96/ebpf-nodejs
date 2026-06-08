@@ -1,0 +1,1 @@
+cmd_Debug/obj.target/binding.node := g++ -o Debug/obj.target/binding.node -shared -pthread -rdynamic -m64  -Wl,-soname=binding.node -Wl,--start-group Debug/obj.target/binding/binding.o Debug/obj.target/node_modules/node-addon-api/nothing.a -Wl,--end-group 
