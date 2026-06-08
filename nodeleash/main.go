@@ -423,5 +423,9 @@ func main() {
 
 	case "enforce":
 		engine.PrintViolationSummary()
+
+		if err := engine.ExportViolationReport(int(targetPID)); err != nil {
+			log.Printf("Violation report export error: %v", err)
+		}
 	}
 }

@@ -119,6 +119,40 @@ func (e *EnforcementEngine) PrintViolationSummary() {
 	}
 }
 
+// ExportViolationReport writes all violations to a timestamped .txt file
+// in the violations directory, mirroring the format printed to stdout.
+func (e *EnforcementEngine) ExportViolationReport(pid int) error {
+	if len(e.violations) == 0 {
+		return nil
+	}
+
+	if err := os.MkdirAll("violations", 0755); err != nil {
+		return fmt.Errorf("creating violations directory: %w", err)
+	}
+
+	reportPath := fmt.Sprintf("violations/violations_pid%d_%d.txt",
+		pid,
+		time.Now().Unix(),
+	)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("NodeLeash Violation Report — PID %d\n", pid))
+	sb.WriteString(fmt.Sprintf("Generated: %s\n", time.Now().Format(time.RFC3339)))
+	sb.WriteString(fmt.Sprintf("Total violations: %d\n", len(e.violations)))
+	sb.WriteString(strings.Repeat("─", 60) + "\n\n")
+
+	for _, v := range e.violations {
+		sb.WriteString(v.String() + "\n")
+	}
+
+	if err := os.WriteFile(reportPath, []byte(sb.String()), 0644); err != nil {
+		return fmt.Errorf("writing report: %w", err)
+	}
+
+	fmt.Printf("📄 Violation report saved: %s\n", reportPath)
+	return nil
+}
+
 // -----------------------------------------------------------------------
 // JSON deserialization
 // -----------------------------------------------------------------------

