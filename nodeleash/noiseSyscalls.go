@@ -16,45 +16,44 @@ import (
 // infrastructure are included.
 var noiseSyscalls = []string{
 
-	/*
-		// Synchronization primitives
-		"futex",
-		"futex_time64",
+	// Synchronization primitives
+	"futex",
+	"futex_time64",
 
-		// Event loop waiting
-		"epoll_wait",
-		"epoll_pwait",
-		"epoll_pwait2",
-		"poll",
-		"ppoll",
-		"select",
-		"pselect6",
+	// Event loop waiting
+	"epoll_wait",
+	"epoll_pwait",
+	"epoll_pwait2",
+	"poll",
+	"ppoll",
+	"select",
+	"pselect6",
 
-		// Scheduling
-		"sched_yield",
-		"nanosleep",
-		"clock_nanosleep",
+	// Scheduling
+	"sched_yield",
+	"nanosleep",
+	"clock_nanosleep",
 
-		// Signal handling
-		"rt_sigprocmask",
-		"rt_sigaction",
-		"rt_sigreturn",
-		"sigaltstack",
+	// Signal handling
+	"rt_sigprocmask",
+	"rt_sigaction",
+	"rt_sigreturn",
+	"sigaltstack",
 
-		// Time queries
-		"clock_gettime",
-		"gettimeofday",
+	// Time queries
+	"clock_gettime",
+	"gettimeofday",
 
-		// Memory management
-		"brk",
-		"mmap",
-		"mprotect",
-		"munmap",
-		"madvise",
+	// Memory management
+	"brk",
+	"mmap",
+	"mprotect",
+	"munmap",
+	"madvise",
 
-		// Process identity
-		"getpid",
-	*/
+	// Process identity
+	"getpid",
+
 	// NodeLeash self-noise
 	"uretprobe",
 }
