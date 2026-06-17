@@ -169,12 +169,6 @@ func main() {
 		log.Fatalf("Inserting PID: %v", err)
 	}
 
-	// Populate the kernel-side infrastructure syscall blocklist.
-	// Drops futex, epoll_wait, poll and other noise before they reach userspace.
-	if err := populateNoiseSyscalls(objs); err != nil {
-		log.Fatalf("Populating noise syscall filter: %v", err)
-	}
-
 	tpSysEnter, err := link.Tracepoint("raw_syscalls", "sys_enter", objs.TraceSysEnter, nil)
 	if err != nil {
 		log.Fatalf("sys_enter: %v", err)
