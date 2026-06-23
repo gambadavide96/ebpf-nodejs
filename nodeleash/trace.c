@@ -131,6 +131,11 @@ int trace_sys_enter(struct sys_enter_args *ctx) {
     // If the pid isn't in the map, we ignore it
     if (!bpf_map_lookup_elem(&target_pid_map, &pid))
         return 0;
+    
+    // Drop sys_uretprobe (id 335) — this syscall is fired by the kernel's
+    // uprobe return mechanism itself and is never attributable to user code.
+    if (syscall_id == 335)
+        return 0;
 
     //Get the current stack for the process that triggered sys_enter    
     int stack_id = bpf_get_stackid(ctx, &stack_map, BPF_F_USER_STACK);

@@ -1,0 +1,30 @@
+NodeLeash Benchmark — PID 4499 — mar 23 giu 2026, 20:25:34, CEST
+
+--- wrk ---
+Running 30s test @ http://127.0.0.1:8080/
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   651.64ms  117.24ms   1.17s    73.41%
+    Req/Sec    41.15     25.94   140.00     66.35%
+  Latency Distribution
+     50%  654.26ms
+     75%  723.20ms
+     90%  792.53ms
+     99%  927.77ms
+  2287 requests in 30.03s, 2.64GB read
+Requests/sec:     76.15
+Transfer/sec:     90.17MB
+
+--- perf stat Node.js (PID 4499) ---
+
+ Performance counter stats for process id '4499':
+
+    27.271.055.979      task-clock                       #    0,909 CPUs utilized             
+           116.838      context-switches                 #    4,284 K/sec                     
+             1.509      cpu-migrations                   #   55,333 /sec                      
+            53.119      page-faults                      #    1,948 K/sec                     
+   <not supported>      cycles                                                                
+
+      30,011460090 seconds time elapsed
+
+
